@@ -100,6 +100,13 @@ Three intertwined systems:
 7. **Voxel-raymarch spike (timeboxed)** — occupancy brickmap + DDA shadow
    ray for the sun; compare vs CSM on looks + frame time; keep the winner
    behind a settings toggle.
+8. **Block-light ray shadows (conditional on 7)** — if the occupancy
+   brickmap ships, march shadow rays toward the N nearest block lights
+   (2–4 within ~16 blocks) so torches/glowstone cast crisp voxel shadows;
+   all other emitters remain flood-fill. Clarification: without this,
+   block lights occlude through walls but do NOT cast directional
+   shadows (flood-fill wraps around obstacles, Minecraft-style) — only
+   the sun/moon cast true shadows in the baseline.
 
 ## Verification
 
