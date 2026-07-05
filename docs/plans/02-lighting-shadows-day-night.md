@@ -159,6 +159,19 @@ Three intertwined systems:
    stay atomic. `lightColor` parsed in `Voxel.Shared` (registry tests);
    glowstone #FFD9A0, lava #FF7A2A. Emissive blocks render fullbright via a
    +4.0 flag on the baked vertex brightness.
+   **FIXED (2026-07-05, hell perf/blowout):** lava oceans produced tens of
+   thousands of radius-15 emitters — synchronous cluster rebuilds stalled
+   frames to a slideshow, and unbounded overflow accumulation blew the whole
+   region out to white. Three corrections: (1) *bulk thinning* — emitters
+   with ≥ 3 same-id emitting neighbors keep only 1-in-4 by world parity
+   (isolated torches/glowstone never thinned); (2) rebuilds moved to a
+   background task over an emitter snapshot, uploaded on the GL thread when
+   done — the shader addresses clusters via the origin the *current texture*
+   was built with (`uLightsOrigin`), so an in-flight rebuild after a recenter
+   can't shift lights; (3) overflow clamped hue-preserving at 1.25 per
+   cluster + a 1.5 soft ceiling on total block light in the shader, so
+   emitter-dense areas read "saturated warm" instead of white. Hell at a
+   lava field: 42 fps + white-out before, 166 fps and stable after.
 5. **Block-light shadow rays** — capped shadowed lights per cluster; the
    money shot: a pillar between a torch and a wall casts a moving shadow
    when the torch is re-placed.

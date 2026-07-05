@@ -542,6 +542,8 @@ public sealed class Game
         _shader.SetFloat("uOccupancySize", _occupancy.Size);
         _shader.SetInt("uLights", 2);
         _lights.Bind(TextureUnit.Texture2);
+        var (lx, ly, lz) = _lights.BuiltOriginWorld;
+        _shader.SetVec3("uLightsOrigin", lx, ly, lz);
         _shader.SetInt("uLightClusters", _lights.Clusters);
         _shader.SetInt("uShadowedLightCap", Math.Clamp(_settings.ShadowedLightCap, 0, 8));
 

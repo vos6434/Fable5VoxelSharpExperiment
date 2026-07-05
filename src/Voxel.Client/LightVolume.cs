@@ -14,10 +14,17 @@ namespace Voxel.Client;
 ///
 /// GPU layout (GL 3.3, no SSBOs): one RGBA32F 3D texture sized
 /// (clusters, clusters, clusters * 9). Depth slice cz*9+s holds slot s of the
-/// cluster column: texel = (position relative to volume origin, packed
-/// color5:5:5 + intensity4 as an exact-integer float). Slice cz*9+8 is the
-/// overflow RGB. Rebuilds run on the main thread and re-upload the whole
-/// texture — they only happen on edits/streaming/recenter and are debounced.
+/// cluster column: texel = (position relative to the volume origin the build
+/// used, packed color5:5:5 + intensity4 as an exact-integer float). Slice
+/// cz*9+8 is the overflow RGB, clamped hue-preserving so emitter-dense areas
+/// (hell lava) can't blow out to white.
+///
+/// Rebuilds run on a background task (hell regions hold thousands of
+/// emitters; distributing them stalls a frame if done inline) over a snapshot
+/// of the emitter lists; the finished texel buffer uploads on the GL thread.
+/// The shader addresses the texture via <see cref="BuiltOriginWorld"/> — the
+/// origin the *current texture contents* were built with — so an in-flight
+/// rebuild after a recenter never shifts existing lights.
 /// </summary>
 public sealed class LightVolume : IDisposable
 {
@@ -25,6 +32,8 @@ public sealed class LightVolume : IDisposable
     private const int Slots = 8;
     private const int Rows = Slots + 1; // + overflow row
     private const double RebuildDebounce = 0.2;
+    /// <summary>Max per-channel overflow light — beyond this the cluster is "saturated bright".</summary>
+    private const float OverflowCap = 1.25f;
 
     public readonly record struct Emitter(float X, float Y, float Z, float R, float G, float B, int Intensity);
 
@@ -52,7 +61,20 @@ public sealed class LightVolume : IDisposable
     private bool _rebuildNeeded;
     private double _cooldown;
 
+    // Background rebuild state (single-flight): the task fills _texData and
+    // sets _buildDone; the GL thread uploads and publishes the built origin.
+    private Task? _buildTask;
+    private (int X, int Y, int Z) _buildOrigin;
+    private (int X, int Y, int Z) _builtOrigin;
+    private volatile bool _buildDone;
+
     public int Clusters => _clusters;
+
+    /// <summary>World min-corner the current texture contents are relative to (shader's uLightsOrigin).</summary>
+    public (float X, float Y, float Z) BuiltOriginWorld => (
+        _builtOrigin.X * Constants.ChunkSize,
+        _builtOrigin.Y * Constants.ChunkSize,
+        _builtOrigin.Z * Constants.ChunkSize);
 
     public LightVolume(GL gl, BlockRegistry blocks, int regionRadiusChunks)
     {
@@ -93,6 +115,7 @@ public sealed class LightVolume : IDisposable
         gl.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
         gl.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
         gl.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureWrapR, (int)TextureWrapMode.ClampToEdge);
+        Upload(); // zero-fill: TexImage3D with null data leaves texels undefined
     }
 
     public void Bind(TextureUnit unit)
@@ -147,12 +170,39 @@ public sealed class LightVolume : IDisposable
                     }
                 }
 
-        _cooldown -= dt;
-        if (_rebuildNeeded && _cooldown <= 0)
+        // Publish a finished background build (the GL upload must happen here,
+        // on the GL thread).
+        if (_buildTask is not null && _buildDone)
         {
-            Rebuild();
+            _buildTask = null;
+            _buildDone = false;
+            Upload();
+            _builtOrigin = _buildOrigin;
+        }
+
+        _cooldown -= dt;
+        if (_rebuildNeeded && _cooldown <= 0 && _buildTask is null)
+        {
+            // Snapshot the emitters: the build runs off-thread while scans
+            // keep mutating the per-chunk lists.
+            int total = 0;
+            foreach (var list in _emitters.Values) total += list.Count;
+            var snapshot = new Emitter[total];
+            int n = 0;
+            foreach (var list in _emitters.Values)
+            {
+                list.CopyTo(snapshot, n);
+                n += list.Count;
+            }
+
+            _buildOrigin = _originChunk;
             _rebuildNeeded = false;
             _cooldown = RebuildDebounce;
+            _buildTask = Task.Run(() =>
+            {
+                Rebuild(snapshot);
+                _buildDone = true;
+            });
         }
     }
 
@@ -177,54 +227,67 @@ public sealed class LightVolume : IDisposable
                 _opaque[blocks[i + S]] == 0 || _opaque[blocks[i - S]] == 0;
             if (!exposed) continue;
 
+            // Bulk thinning (hell lava oceans): a block with 3+ same-id
+            // emitting neighbors is part of a contiguous glowing field; keep
+            // only 1 in 4 (world-parity, so it's stable across rescans).
+            // Isolated emitters (torches, single glowstone) are never thinned.
+            int wx = cx * S + x, wy = cy * S + y, wz = cz * S + z;
+            if ((wx & 1) != 0 || (wz & 1) != 0)
+            {
+                int same = 0;
+                if (x < S - 1 && blocks[i + 1] == id) same++;
+                if (x > 0 && blocks[i - 1] == id) same++;
+                if (y < S - 1 && blocks[i + S * S] == id) same++;
+                if (y > 0 && blocks[i - S * S] == id) same++;
+                if (z < S - 1 && blocks[i + S] == id) same++;
+                if (z > 0 && blocks[i - S] == id) same++;
+                if (same >= 3) continue;
+            }
+
             (found ??= new List<Emitter>()).Add(new Emitter(
-                cx * S + x + 0.5f, cy * S + y + 0.5f, cz * S + z + 0.5f,
+                wx + 0.5f, wy + 0.5f, wz + 0.5f,
                 _colR[id], _colG[id], _colB[id], _emission[id]));
         }
         return found;
     }
 
-    private void Rebuild()
+    private void Rebuild(Emitter[] emitters)
     {
         Array.Clear(_texData);
         Array.Clear(_slotKey);
         Array.Clear(_slotCount);
 
         const int S = Constants.ChunkSize;
-        float ox = _originChunk.X * S, oy = _originChunk.Y * S, oz = _originChunk.Z * S;
+        float ox = _buildOrigin.X * S, oy = _buildOrigin.Y * S, oz = _buildOrigin.Z * S;
         // A light reaches a cluster if any point of it is within the radius:
         // center distance <= radius + half cluster diagonal.
         float clusterReach = ClusterBlocks * 0.5f * MathF.Sqrt(3f);
 
-        foreach (var list in _emitters.Values)
+        foreach (var e in emitters)
         {
-            foreach (var e in list)
-            {
-                float rx = e.X - ox, ry = e.Y - oy, rz = e.Z - oz;
-                float radius = e.Intensity;
-                int c0x = Math.Max(0, (int)((rx - radius) / ClusterBlocks));
-                int c0y = Math.Max(0, (int)((ry - radius) / ClusterBlocks));
-                int c0z = Math.Max(0, (int)((rz - radius) / ClusterBlocks));
-                int c1x = Math.Min(_clusters - 1, (int)((rx + radius) / ClusterBlocks));
-                int c1y = Math.Min(_clusters - 1, (int)((ry + radius) / ClusterBlocks));
-                int c1z = Math.Min(_clusters - 1, (int)((rz + radius) / ClusterBlocks));
+            float rx = e.X - ox, ry = e.Y - oy, rz = e.Z - oz;
+            float radius = e.Intensity;
+            int c0x = Math.Max(0, (int)((rx - radius) / ClusterBlocks));
+            int c0y = Math.Max(0, (int)((ry - radius) / ClusterBlocks));
+            int c0z = Math.Max(0, (int)((rz - radius) / ClusterBlocks));
+            int c1x = Math.Min(_clusters - 1, (int)((rx + radius) / ClusterBlocks));
+            int c1y = Math.Min(_clusters - 1, (int)((ry + radius) / ClusterBlocks));
+            int c1z = Math.Min(_clusters - 1, (int)((rz + radius) / ClusterBlocks));
 
-                for (int cz = c0z; cz <= c1z; cz++)
-                    for (int cy = c0y; cy <= c1y; cy++)
-                        for (int cx = c0x; cx <= c1x; cx++)
-                        {
-                            float mx = (cx + 0.5f) * ClusterBlocks - rx;
-                            float my = (cy + 0.5f) * ClusterBlocks - ry;
-                            float mz = (cz + 0.5f) * ClusterBlocks - rz;
-                            float dist = MathF.Sqrt(mx * mx + my * my + mz * mz);
-                            if (dist > radius + clusterReach) continue;
-                            Insert((cz * _clusters + cy) * _clusters + cx, e, e.Intensity / (1f + dist));
-                        }
-            }
+            for (int cz = c0z; cz <= c1z; cz++)
+                for (int cy = c0y; cy <= c1y; cy++)
+                    for (int cx = c0x; cx <= c1x; cx++)
+                    {
+                        float mx = (cx + 0.5f) * ClusterBlocks - rx;
+                        float my = (cy + 0.5f) * ClusterBlocks - ry;
+                        float mz = (cz + 0.5f) * ClusterBlocks - rz;
+                        float dist = MathF.Sqrt(mx * mx + my * my + mz * mz);
+                        if (dist > radius + clusterReach) continue;
+                        Insert((cz * _clusters + cy) * _clusters + cx, e, e.Intensity / (1f + dist));
+                    }
         }
 
         WriteTexels();
-        Upload();
     }
 
     private void Insert(int cluster, in Emitter e, float key)
@@ -263,9 +326,9 @@ public sealed class LightVolume : IDisposable
         int cy = cluster / _clusters % _clusters;
         int cz = cluster / (_clusters * _clusters);
         const int S = Constants.ChunkSize;
-        float mx = (cx + 0.5f) * ClusterBlocks - (e.X - _originChunk.X * S);
-        float my = (cy + 0.5f) * ClusterBlocks - (e.Y - _originChunk.Y * S);
-        float mz = (cz + 0.5f) * ClusterBlocks - (e.Z - _originChunk.Z * S);
+        float mx = (cx + 0.5f) * ClusterBlocks - (e.X - _buildOrigin.X * S);
+        float my = (cy + 0.5f) * ClusterBlocks - (e.Y - _buildOrigin.Y * S);
+        float mz = (cz + 0.5f) * ClusterBlocks - (e.Z - _buildOrigin.Z * S);
         float dist = MathF.Sqrt(mx * mx + my * my + mz * mz);
         float falloff = Math.Max(0f, 1f - dist / e.Intensity) * (e.Intensity / 15f);
         if (falloff <= 0) return;
@@ -282,12 +345,25 @@ public sealed class LightVolume : IDisposable
     private void WriteTexels()
     {
         const int S = Constants.ChunkSize;
-        float ox = _originChunk.X * S, oy = _originChunk.Y * S, oz = _originChunk.Z * S;
+        float ox = _buildOrigin.X * S, oy = _buildOrigin.Y * S, oz = _buildOrigin.Z * S;
         for (int cz = 0; cz < _clusters; cz++)
             for (int cy = 0; cy < _clusters; cy++)
                 for (int cx = 0; cx < _clusters; cx++)
                 {
                     int cluster = (cz * _clusters + cy) * _clusters + cx;
+
+                    // Clamp the accumulated overflow hue-preserving: hundreds
+                    // of folded lava lights must read "saturated warm", not white.
+                    int ot = TexelIndex(cx, cy, cz, Slots);
+                    float peak = Math.Max(_texData[ot], Math.Max(_texData[ot + 1], _texData[ot + 2]));
+                    if (peak > OverflowCap)
+                    {
+                        float k = OverflowCap / peak;
+                        _texData[ot] *= k;
+                        _texData[ot + 1] *= k;
+                        _texData[ot + 2] *= k;
+                    }
+
                     int count = _slotCount[cluster];
                     for (int s = 0; s < count; s++)
                     {

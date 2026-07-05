@@ -29,9 +29,12 @@ uniform float uOccupancySize;  // edge length in voxels
 
 // Clustered block lights (plan 02 M4/M5): 8^3-block clusters over the same
 // region as the occupancy volume. Depth slice cz*9+s = light slot s of the
-// cluster (xyz = position relative to volume origin, w = packed color+
-// intensity); slice cz*9+8 = unshadowed overflow color.
+// cluster (xyz = position relative to uLightsOrigin, w = packed color+
+// intensity); slice cz*9+8 = unshadowed overflow color. uLightsOrigin is the
+// origin the texture was *built* with — rebuilds are async, so it can lag one
+// recenter behind uOccupancyOrigin.
 uniform sampler3D uLights;
+uniform vec3 uLightsOrigin;
 uniform int uLightClusters;     // clusters per edge
 uniform int uShadowedLightCap;  // block lights beyond this skip the shadow ray
 
@@ -127,7 +130,9 @@ float lightRay(vec3 fromRel, vec3 lightRel, vec3 dir) {
 
 // Sum of colored block lights hitting this fragment (clustered, plan 02 M4/M5).
 vec3 blockLight(vec3 worldPos, vec3 normal) {
-    vec3 rel = worldPos - uOccupancyOrigin;
+    // Cluster addressing is relative to the lights' build origin; shadow rays
+    // march in occupancy space (the two origins can differ transiently).
+    vec3 rel = worldPos - uLightsOrigin;
     ivec3 cluster = ivec3(floor(rel / 8.0));
     if (cluster.x < 0 || cluster.y < 0 || cluster.z < 0 ||
         cluster.x >= uLightClusters || cluster.y >= uLightClusters || cluster.z >= uLightClusters) {
@@ -137,7 +142,7 @@ vec3 blockLight(vec3 worldPos, vec3 normal) {
     // Overflow: lights past the per-cluster cap, unshadowed and direction-less.
     vec3 total = texelFetch(uLights, ivec3(cluster.x, cluster.y, cluster.z * 9 + 8), 0).rgb;
 
-    vec3 fromRel = rel + normal * 0.01;
+    vec3 occRel = worldPos - uOccupancyOrigin + normal * 0.01;
     for (int s = 0; s < 8; s++) {
         vec4 t = texelFetch(uLights, ivec3(cluster.x, cluster.y, cluster.z * 9 + s), 0);
         if (t.w < 1.0) break; // slots fill front-to-back; w=0 means empty
@@ -157,10 +162,19 @@ vec3 blockLight(vec3 worldPos, vec3 normal) {
         float ndotl = dot(normal, ldir);
         if (ndotl <= 0.0) continue;
 
-        float vis = s < uShadowedLightCap ? lightRay(fromRel, t.xyz, ldir) : 1.0;
+        float vis = 1.0;
+        if (s < uShadowedLightCap) {
+            vec3 lightOccRel = t.xyz + uLightsOrigin - uOccupancyOrigin;
+            vis = lightRay(occRel, lightOccRel, ldir);
+        }
         if (vis <= 0.0) continue;
         total += color * ((1.0 - dist / intensity) * (intensity / 15.0) * ndotl * vis);
     }
+
+    // Soft ceiling (hue-preserving): dozens of overlapping lava lights
+    // saturate instead of blowing out to white.
+    float peak = max(total.r, max(total.g, total.b));
+    if (peak > 1.5) total *= 1.5 / peak;
     return total;
 }
 
