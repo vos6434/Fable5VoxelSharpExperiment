@@ -354,12 +354,51 @@ public sealed class Game
         return id != 0 && _data.Blocks.Get(id).Collision != Collision.Liquid;
     }
 
+    private void DrawThickBoxEdge(float ox, float oy, float oz, float sx, float sy, float sz, float r, float g, float b)
+    {
+        _colorShader.SetVec3("uOrigin", ox, oy, oz);
+        _colorShader.SetVec3("uScale", sx, sy, sz);
+        _colorShader.SetFloat4("uColor", r, g, b, 1f);
+        _cubeTriangles.Draw();
+    }
+
     private void DrawGlueCornerMarker((int X, int Y, int Z) c, float r, float g, float b)
     {
-        _colorShader.SetVec3("uOrigin", c.X - 0.002f, c.Y - 0.002f, c.Z - 0.002f);
-        _colorShader.SetVec3("uScale", 1.004f, 1.004f, 1.004f);
+        const float pad = 0.006f;
+        _colorShader.SetVec3("uOrigin", c.X - pad, c.Y - pad, c.Z - pad);
+        _colorShader.SetVec3("uScale", 1 + pad * 2, 1 + pad * 2, 1 + pad * 2);
         _colorShader.SetFloat4("uColor", r, g, b, 1f);
-        _cubeLines.Draw();
+        _cubeTriangles.Draw();
+    }
+
+    /// <summary>WorldEdit-style AABB outline from block corners (inclusive).</summary>
+    private void DrawGlueSelectionBox(int minX, int minY, int minZ, int maxX, int maxY, int maxZ)
+    {
+        const float pad = 0.002f;
+        const float t = 0.04f;
+        float ox = minX - pad, oy = minY - pad, oz = minZ - pad;
+        float sx = maxX - minX + 1 + pad * 2;
+        float sy = maxY - minY + 1 + pad * 2;
+        float sz = maxZ - minZ + 1 + pad * 2;
+        float d = t * 2;
+        // Bright lime — readable on water, grass, and night terrain.
+        const float r = 0.35f, g = 1f, b = 0.3f;
+
+        // Bottom (y = oy)
+        DrawThickBoxEdge(ox, oy - t, oz - t, sx, d, d, r, g, b);
+        DrawThickBoxEdge(ox, oy - t, oz + sz - t, sx, d, d, r, g, b);
+        DrawThickBoxEdge(ox - t, oy - t, oz, d, d, sz, r, g, b);
+        DrawThickBoxEdge(ox + sx - t, oy - t, oz, d, d, sz, r, g, b);
+        // Top (y = oy + sy)
+        DrawThickBoxEdge(ox, oy + sy - t, oz - t, sx, d, d, r, g, b);
+        DrawThickBoxEdge(ox, oy + sy - t, oz + sz - t, sx, d, d, r, g, b);
+        DrawThickBoxEdge(ox - t, oy + sy - t, oz, d, d, sz, r, g, b);
+        DrawThickBoxEdge(ox + sx - t, oy + sy - t, oz, d, d, sz, r, g, b);
+        // Vertical pillars
+        DrawThickBoxEdge(ox - t, oy, oz - t, d, sy, d, r, g, b);
+        DrawThickBoxEdge(ox + sx - t, oy, oz - t, d, sy, d, r, g, b);
+        DrawThickBoxEdge(ox - t, oy, oz + sz - t, d, sy, d, r, g, b);
+        DrawThickBoxEdge(ox + sx - t, oy, oz + sz - t, d, sy, d, r, g, b);
     }
 
     private RaycastHit? Aim()
@@ -667,21 +706,18 @@ public sealed class Game
             var c2 = _glueCorner2 ?? (_target is RaycastHit t ? ((int X, int Y, int Z)?)(t.X, t.Y, t.Z) : null);
             if (c2 is { } c2v)
             {
-                int minX = Math.Min(c1.X, c2v.X), maxX = Math.Max(c1.X, c2v.X);
-                int minY = Math.Min(c1.Y, c2v.Y), maxY = Math.Max(c1.Y, c2v.Y);
-                int minZ = Math.Min(c1.Z, c2v.Z), maxZ = Math.Max(c1.Z, c2v.Z);
-                const float pad = 0.002f;
-                _colorShader.SetVec3("uOrigin", minX - pad, minY - pad, minZ - pad);
-                _colorShader.SetVec3("uScale", maxX - minX + 1 + pad * 2, maxY - minY + 1 + pad * 2, maxZ - minZ + 1 + pad * 2);
-                _colorShader.SetFloat4("uColor", 1f, 0.85f, 0.2f, 1f);
-                _cubeLines.Draw();
-                draws++;
+                _gl.Disable(EnableCap.CullFace);
+                DrawGlueSelectionBox(
+                    Math.Min(c1.X, c2v.X), Math.Min(c1.Y, c2v.Y), Math.Min(c1.Z, c2v.Z),
+                    Math.Max(c1.X, c2v.X), Math.Max(c1.Y, c2v.Y), Math.Max(c1.Z, c2v.Z));
+                draws += 12;
+                _gl.Enable(EnableCap.CullFace);
             }
-            DrawGlueCornerMarker(c1, 1f, 0.85f, 0.2f);
+            DrawGlueCornerMarker(c1, 0.95f, 1f, 0.85f);
             draws++;
             if (_glueCorner2 is { } c2set)
             {
-                DrawGlueCornerMarker(c2set, 0.35f, 0.85f, 1f);
+                DrawGlueCornerMarker(c2set, 0.55f, 1f, 1f);
                 draws++;
             }
         }
