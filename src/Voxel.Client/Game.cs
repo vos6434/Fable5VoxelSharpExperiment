@@ -4,6 +4,7 @@ using Silk.NET.OpenGL;
 using Silk.NET.Windowing;
 using StbImageWriteSharp;
 using Voxel.Client.Gl;
+using Voxel.Client.Ui;
 using Voxel.Shared;
 
 namespace Voxel.Client;
@@ -18,6 +19,10 @@ public sealed record GameOptions
     public (float Yaw, float Pitch)? StartLook { get; init; }
     /// <summary>Verification hook: after streaming settles, place a glowstone column and break a block via the interaction code path.</summary>
     public bool DemoEdits { get; init; }
+    /// <summary>Verification hook: open the inventory + creative windows with a cursor stack.</summary>
+    public bool DemoGui { get; init; }
+    /// <summary>Verification hook: show the pause menu.</summary>
+    public bool DemoPause { get; init; }
 }
 
 /// <summary>
@@ -51,9 +56,14 @@ public sealed class Game
     private readonly FlyCamera _camera = new();
     private readonly RemotePlayers _players = new();
 
+    private Settings _settings = null!;
+    private PlayerInventory _inventory = null!;
+    private GuiSystem _gui = null!;
+    private UiBatch _uiBatch = null!;
+    private UiFont _font = null!;
+    private IMouse _mouse = null!;
+
     private const float Reach = 6f;
-    private List<BlockDefinition> _placeable = null!;
-    private int _selected;
     private RaycastHit? _target;
 
     private System.Numerics.Vector2 _lastMouse;
@@ -61,6 +71,7 @@ public sealed class Game
     private int _frameCount;
     private double _fpsTimer;
     private int _fpsFrames;
+    private int _lastFps;
     private double _moveSendTimer;
 
     public Game(GameOptions options)
@@ -90,46 +101,91 @@ public sealed class Game
         _keyboard = input.Keyboards[0];
         var mouse = input.Mice[0];
 
+        _mouse = mouse;
         mouse.MouseMove += (_, pos) =>
         {
-            if (_firstMouse) { _lastMouse = pos; _firstMouse = false; return; }
-            _camera.ApplyMouseDelta(pos.X - _lastMouse.X, pos.Y - _lastMouse.Y);
-            _lastMouse = pos;
-        };
-        mouse.MouseDown += (m, button) =>
-        {
-            if (!_camera.Captured)
+            if (_camera.Captured)
             {
-                // First click only captures; interactions need an already-captured mouse.
-                _camera.Captured = true;
-                m.Cursor.CursorMode = CursorMode.Disabled;
+                if (_firstMouse) { _lastMouse = pos; _firstMouse = false; return; }
+                _camera.ApplyMouseDelta(pos.X - _lastMouse.X, pos.Y - _lastMouse.Y);
+                _lastMouse = pos;
+            }
+            else
+            {
+                _gui?.OnMouseMove(pos.X, pos.Y);
+                _lastMouse = pos;
+            }
+        };
+        mouse.MouseDown += (_, button) =>
+        {
+            int uiButton = button == MouseButton.Right ? 2 : 0;
+            if (_camera.Captured)
+            {
+                if (button == MouseButton.Left) BreakTargeted();
+                else if (button == MouseButton.Right) PlaceAtTarget();
                 return;
             }
-            if (button == MouseButton.Left) BreakTargeted();
-            else if (button == MouseButton.Right) PlaceAtTarget();
+            if (_gui.OnMouseDown(_lastMouse.X, _lastMouse.Y, uiButton)) return;
+            // Click on empty space with nothing open: capture and play.
+            if (!_gui.AnyOpen && !_gui.PauseVisible) SetCaptured(true);
         };
+        mouse.MouseUp += (_, _) => _gui?.OnMouseUp();
         mouse.Scroll += (_, wheel) =>
         {
-            if (!_camera.Captured || _placeable is null) return;
+            if (!_camera.Captured) return;
             int dir = wheel.Y < 0 ? 1 : -1;
-            _selected = (_selected + dir + _placeable.Count) % _placeable.Count;
+            _inventory.Selected = (_inventory.Selected + dir + 10) % 10;
+            _inventory.Save();
         };
         _keyboard.KeyDown += (_, key, _) =>
         {
-            if (key == Key.Escape && _camera.Captured)
+            switch (key)
             {
-                _camera.Captured = false;
-                mouse.Cursor.CursorMode = CursorMode.Normal;
-                return;
+                case Key.E:
+                    // Toggle inventory + creative together (web parity).
+                    if (_gui.CloseAll())
+                    {
+                        if (!_gui.PauseVisible) SetCaptured(true);
+                    }
+                    else
+                    {
+                        SetCaptured(false);
+                        _gui.Open("inventory");
+                        _gui.Open("creative_menu");
+                    }
+                    return;
+                case Key.Escape:
+                    if (_gui.PauseVisible)
+                    {
+                        _gui.HidePause();
+                        SetCaptured(true);
+                    }
+                    else if (_gui.CloseAll())
+                    {
+                        SetCaptured(true);
+                    }
+                    else if (_camera.Captured)
+                    {
+                        SetCaptured(false);
+                        _gui.ShowPause();
+                    }
+                    return;
+                default:
+                {
+                    int? slot = key switch
+                    {
+                        >= Key.Number1 and <= Key.Number9 => key - Key.Number1,
+                        Key.Number0 => 9,
+                        _ => null,
+                    };
+                    if (slot is int s)
+                    {
+                        _inventory.Selected = s;
+                        _inventory.Save();
+                    }
+                    break;
+                }
             }
-            // 1-9, 0 select from the placeable list (temporary until the P6 hotbar).
-            int? slot = key switch
-            {
-                >= Key.Number1 and <= Key.Number9 => key - Key.Number1,
-                Key.Number0 => 9,
-                _ => null,
-            };
-            if (slot is int s && _placeable is not null && s < _placeable.Count) _selected = s;
         };
 
         _data = ClientData.Load(Path.Combine(_options.RepoRoot, "data"));
@@ -166,9 +222,26 @@ public sealed class Game
         _atlasTexture = CreateAtlasTexture();
         _gl.Enable(EnableCap.DepthTest);
 
-        _placeable = _data.Blocks.Defs.Where(d => d.NumericId != 0).ToList();
-        _selected = _placeable.FindIndex(d => d.StringId == "stone");
-        if (_selected < 0) _selected = 0;
+        // ---- GUI system -----------------------------------------------------
+        _settings = Settings.Load(Path.Combine(_options.RepoRoot, "settings.json"));
+        _inventory = new PlayerInventory(_data.Blocks, _data.Items, _settings);
+        _gui = new GuiSystem(_gl, _data, _inventory, _settings, Path.Combine(_options.RepoRoot, "data"));
+        _gui.OnResume = () => SetCaptured(true);
+        _gui.SetScreenSize(_window.FramebufferSize.X, _window.FramebufferSize.Y);
+        _window.FramebufferResize += size => _gui.SetScreenSize(size.X, size.Y);
+        var uiShader = new GlShader(
+            _gl,
+            File.ReadAllText(Path.Combine(_options.RepoRoot, "shaders", "ui.vert")),
+            File.ReadAllText(Path.Combine(_options.RepoRoot, "shaders", "ui.frag")));
+        _uiBatch = new UiBatch(_gl, uiShader, _atlasTexture);
+        _font = new UiFont(_gl, 18f);
+    }
+
+    private void SetCaptured(bool captured)
+    {
+        _camera.Captured = captured;
+        _mouse.Cursor.CursorMode = captured ? CursorMode.Disabled : CursorMode.Normal;
+        _firstMouse = true;
     }
 
     // ---- interaction ---------------------------------------------------------
@@ -203,13 +276,15 @@ public sealed class Game
     private void PlaceAtTarget()
     {
         if (Aim() is not RaycastHit hit) return;
+        var stack = _inventory.SelectedStack();
+        var blockDef = stack is null ? null : _data.Blocks.ById(stack.Id);
+        if (blockDef is null) return; // empty hand or a non-block item
         int px = hit.X + hit.Nx;
         int py = hit.Y + hit.Ny;
         int pz = hit.Z + hit.Nz;
         if (_world.GetBlock(px, py, pz) != 0) return;
-        ushort id = (ushort)_placeable[_selected].NumericId;
-        _world.SetBlock(px, py, pz, id);
-        _connection.SendSetBlock(px, py, pz, id);
+        _world.SetBlock(px, py, pz, (ushort)blockDef.NumericId);
+        _connection.SendSetBlock(px, py, pz, (ushort)blockDef.NumericId);
     }
 
     private unsafe uint CreateAtlasTexture()
@@ -253,7 +328,22 @@ public sealed class Game
             _connection.SendMove(_camera.X, _camera.Y, _camera.Z, _camera.Yaw, _camera.Pitch);
         }
 
-        // Verification hook: exercise the real break/place path once streaming settles.
+        _gui.SetCtrlHeld(_keyboard.IsKeyPressed(Key.ControlLeft) || _keyboard.IsKeyPressed(Key.ControlRight));
+
+        // Verification hooks.
+        if (_options.DemoGui && _frameCount == 240)
+        {
+            _gui.Open("inventory");
+            _gui.Open("creative_menu");
+            int hellIdx = _inventory.CreativeList.IndexOf("hellstone");
+            if (hellIdx >= 0) _inventory.HandleSlotClick("creative", hellIdx, 0); // stack on cursor
+            _gui.OnMouseMove(_window.FramebufferSize.X * 0.72f, _window.FramebufferSize.Y * 0.68f);
+        }
+        if (_options.DemoPause && _frameCount == 240)
+        {
+            _gui.ShowPause();
+            _gui.OnMouseMove(_window.FramebufferSize.X * 0.5f, _window.FramebufferSize.Y * 0.42f);
+        }
         if (_options.DemoEdits && _frameCount == 240)
         {
             var (dx, dy, dz) = AimDirection();
@@ -355,18 +445,45 @@ public sealed class Game
             _cubeLines.Draw();
         }
 
+        // ---- UI overlay ------------------------------------------------------
+        _gl.Disable(EnableCap.DepthTest);
+        _gl.Disable(EnableCap.CullFace);
+        _gl.Enable(EnableCap.Blend);
+        _gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+        _uiBatch.Begin(size.X, size.Y);
+
+        var stats = _world.Stats;
+        var held = _inventory.SelectedStack();
+        string[] hudLines =
+        [
+            $"fps {_lastFps}  draws {draws}  tris {triangles}",
+            $"online as {_playerName} (#{_connection.PlayerId})  players {_players.Count + 1}",
+            $"pos {_camera.X:F1} {_camera.Y:F1} {_camera.Z:F1}  biome {_generator.BiomeAt(_camera.X, _camera.Y, _camera.Z)}",
+            $"chunks {stats.Loaded} loaded, {stats.Rendered} rendered  net {stats.AwaitingNet}  mesh {stats.PendingMesh} ({stats.Workers} workers)",
+            $"hand {(held is null ? "empty" : _inventory.DisplayNameOf(held.Id))}  |  render distance {StreamingWorld.RenderRadius}",
+        ];
+        for (int i = 0; i < hudLines.Length; i++)
+        {
+            _font.DrawShadowed(_uiBatch, 8, 8 + i * (_font.LineHeight + 2), hudLines[i]);
+        }
+
+        if (_camera.Captured)
+        {
+            _font.DrawShadowed(_uiBatch, size.X / 2f - _font.Measure("+") / 2, size.Y / 2f - _font.LineHeight / 2, "+");
+        }
+
+        _gui.Draw(_uiBatch, _font, _camera.Captured);
+        _uiBatch.End();
+        _gl.Enable(EnableCap.DepthTest);
+        _gl.Disable(EnableCap.Blend);
+
         _frameCount++;
         _fpsFrames++;
         _fpsTimer += dt;
         if (_fpsTimer >= 1.0)
         {
-            var s = _world.Stats;
-            _window.Title =
-                $"Fable5VoxelSharp - {_fpsFrames} fps - {draws} draws {triangles} tris - " +
-                $"pos {_camera.X:F0} {_camera.Y:F0} {_camera.Z:F0} - " +
-                $"biome {_generator.BiomeAt(_camera.X, _camera.Y, _camera.Z)} - " +
-                $"players {_players.Count + 1} - hand {_placeable[_selected].Name} - " +
-                $"chunks {s.Loaded} loaded {s.Rendered} rendered, net {s.AwaitingNet} mesh {s.PendingMesh}";
+            _lastFps = _fpsFrames;
+            _window.Title = $"Fable5VoxelSharp - {_lastFps} fps";
             _fpsFrames = 0;
             _fpsTimer = 0;
         }

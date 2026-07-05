@@ -55,6 +55,8 @@ public sealed class GlShader : IDisposable
     public void SetMatrix(string name, float[] columnMajor) =>
         _gl.UniformMatrix4(Location(name), 1, transpose: false, in columnMajor[0]);
 
+    public void SetVec2(string name, float x, float y) => _gl.Uniform2(Location(name), x, y);
+
     public void SetVec3(string name, float x, float y, float z) => _gl.Uniform3(Location(name), x, y, z);
 
     public void SetFloat4(string name, float x, float y, float z, float w) => _gl.Uniform4(Location(name), x, y, z, w);
