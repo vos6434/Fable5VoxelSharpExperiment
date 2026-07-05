@@ -12,6 +12,7 @@ public sealed class PostChain : IDisposable
 {
     private readonly GL _gl;
     private readonly GlShader _composite;
+    private readonly uint _vao;
 
     public RenderTarget Scene { get; }
 
@@ -22,6 +23,9 @@ public sealed class PostChain : IDisposable
         _composite = new GlShader(gl,
             File.ReadAllText(Path.Combine(shaderDir, "post.vert")),
             File.ReadAllText(Path.Combine(shaderDir, "composite.frag")));
+        // Attribute-less VAO for the fullscreen triangle (core profile
+        // requires a bound VAO for any draw; see SkyRenderer).
+        _vao = gl.GenVertexArray();
     }
 
     public void Resize(int width, int height) => Scene.Resize(width, height);
@@ -36,6 +40,7 @@ public sealed class PostChain : IDisposable
         _gl.Viewport(0, 0, (uint)screenWidth, (uint)screenHeight);
         _gl.Disable(EnableCap.DepthTest);
         _gl.Disable(EnableCap.Blend);
+        _gl.BindVertexArray(_vao);
         _composite.Use();
         _composite.SetInt("uScene", 0);
         _gl.ActiveTexture(TextureUnit.Texture0);
@@ -46,6 +51,7 @@ public sealed class PostChain : IDisposable
 
     public void Dispose()
     {
+        _gl.DeleteVertexArray(_vao);
         Scene.Dispose();
         _composite.Dispose();
     }

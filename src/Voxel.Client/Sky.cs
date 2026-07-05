@@ -116,6 +116,7 @@ public sealed class SkyRenderer : IDisposable
 {
     private readonly GL _gl;
     private readonly GlShader _shader;
+    private readonly uint _vao;
 
     public SkyRenderer(GL gl, string shaderDir)
     {
@@ -123,6 +124,11 @@ public sealed class SkyRenderer : IDisposable
         _shader = new GlShader(gl,
             File.ReadAllText(Path.Combine(shaderDir, "post.vert")),
             File.ReadAllText(Path.Combine(shaderDir, "sky.frag")));
+        // Attribute-less VAO for the gl_VertexID fullscreen triangle: core
+        // profile rejects draws with VAO 0 bound, and relying on whatever VAO
+        // the previous pass left bound breaks whenever a mesh upload resets
+        // the binding to 0 (black-sky flicker while chunks stream in).
+        _vao = gl.GenVertexArray();
     }
 
     public void Render(
@@ -132,6 +138,7 @@ public sealed class SkyRenderer : IDisposable
     {
         _gl.Disable(EnableCap.DepthTest);
         _gl.Disable(EnableCap.CullFace);
+        _gl.BindVertexArray(_vao);
         _shader.Use();
         _shader.SetVec3("uCamForward", forward.X, forward.Y, forward.Z);
         _shader.SetVec3("uCamRight", right.X, right.Y, right.Z);
@@ -147,5 +154,9 @@ public sealed class SkyRenderer : IDisposable
         _gl.Enable(EnableCap.DepthTest);
     }
 
-    public void Dispose() => _shader.Dispose();
+    public void Dispose()
+    {
+        _gl.DeleteVertexArray(_vao);
+        _shader.Dispose();
+    }
 }
