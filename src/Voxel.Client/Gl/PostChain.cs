@@ -43,8 +43,12 @@ public sealed class PostChain : IDisposable
         _gl.BindVertexArray(_vao);
         _composite.Use();
         _composite.SetInt("uScene", 0);
+        _composite.SetInt("uDepth", 1);
         _gl.ActiveTexture(TextureUnit.Texture0);
         _gl.BindTexture(TextureTarget.Texture2D, Scene.ColorTexture);
+        _gl.ActiveTexture(TextureUnit.Texture1);
+        _gl.BindTexture(TextureTarget.Texture2D, Scene.DepthTexture);
+        _gl.ActiveTexture(TextureUnit.Texture0);
         _gl.DrawArrays(PrimitiveType.Triangles, 0, 3);
         _gl.Enable(EnableCap.DepthTest);
     }
