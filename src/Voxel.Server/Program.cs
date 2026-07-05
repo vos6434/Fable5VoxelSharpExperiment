@@ -58,9 +58,26 @@ _ = Task.Run(() =>
     {
         string[] parts = line.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length == 0) continue;
+
+        // spawn [x y z] — drop a debug physics box (plan 03 M1).
+        if (parts[0] == "spawn")
+        {
+            var spawn = generator.FindSpawn();
+            float sx = spawn.X, sy = WorldGen.SeaLevel + 20, sz = spawn.Z;
+            if (parts.Length >= 4 &&
+                float.TryParse(parts[1], System.Globalization.CultureInfo.InvariantCulture, out float px) &&
+                float.TryParse(parts[2], System.Globalization.CultureInfo.InvariantCulture, out float py) &&
+                float.TryParse(parts[3], System.Globalization.CultureInfo.InvariantCulture, out float pz))
+            {
+                (sx, sy, sz) = (px, py, pz);
+            }
+            gameServer.RequestSpawnDebugBox(new System.Numerics.Vector3(sx, sy, sz), blocks.Resolve("stone"));
+            continue;
+        }
+
         if (parts[0] != "tick")
         {
-            Console.WriteLine("[server] commands: tick rate <x> | tick pause | tick resume | tick step [n] | tick status");
+            Console.WriteLine("[server] commands: spawn [x y z] | tick rate <x> | tick pause | tick resume | tick step [n] | tick status");
             continue;
         }
         switch (parts.ElementAtOrDefault(1))

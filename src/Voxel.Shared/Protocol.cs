@@ -26,6 +26,10 @@ public enum Msg : byte
     PlayerLeave = 14, // JSON { id }
     PlayerMoves = 15, // u16 count, count x (u16 id, f32 x,y,z,yaw,pitch)
     TimeSync = 16,    // i64 worldTick, f32 timescale, i32 dayLengthTicks
+    // Physics entities (plan 03): contraptions and debug bodies.
+    EntitySpawn = 17,   // u32 id, u8 kind, u16 dimX,dimY,dimZ, f64 x,y,z, f32 qx,qy,qz,qw, [deflate-raw u16 blocks]
+    EntityState = 18,   // u16 count, count x (u32 id, f32 x,y,z, f32 qx,qy,qz,qw, f32 vx,vy,vz)
+    EntityDespawn = 19, // u32 id, u8 becameBlocks
 }
 
 public sealed class WelcomePayload
@@ -79,9 +83,10 @@ public static class Protocol
     /// Bumped on every wire-format change. Mismatched clients are rejected at
     /// Hello with a clear close reason instead of decoding garbage.
     /// History: 1 = launch (implicit), 2 = version handshake + TimeSync,
-    /// 3 = TimeControl (debug menu time slider / pause).
+    /// 3 = TimeControl (debug menu time slider / pause),
+    /// 4 = physics entities (spawn/state/despawn).
     /// </summary>
-    public const int Version = 3;
+    public const int Version = 4;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -212,6 +217,119 @@ public static class Protocol
             BinaryPrimitives.ReadInt32LittleEndian(message[9..]),
             BinaryPrimitives.ReadUInt16LittleEndian(message[13..]));
     }
+
+    // ---- Physics entities (plan 03) -------------------------------------------
+
+    public readonly record struct EntitySpawnData(
+        uint Id, byte Kind, ushort DimX, ushort DimY, ushort DimZ,
+        double X, double Y, double Z, float Qx, float Qy, float Qz, float Qw,
+        ReadOnlyMemory<byte> CompressedBlocks);
+
+    public static byte[] EncodeEntitySpawn(
+        uint id, byte kind, ushort dimX, ushort dimY, ushort dimZ,
+        double x, double y, double z, float qx, float qy, float qz, float qw,
+        byte[] compressedBlocks)
+    {
+        var outBuf = new byte[1 + 4 + 1 + 6 + 24 + 16 + compressedBlocks.Length];
+        var s = outBuf.AsSpan();
+        s[0] = (byte)Msg.EntitySpawn;
+        BinaryPrimitives.WriteUInt32LittleEndian(s[1..], id);
+        s[5] = kind;
+        BinaryPrimitives.WriteUInt16LittleEndian(s[6..], dimX);
+        BinaryPrimitives.WriteUInt16LittleEndian(s[8..], dimY);
+        BinaryPrimitives.WriteUInt16LittleEndian(s[10..], dimZ);
+        BinaryPrimitives.WriteDoubleLittleEndian(s[12..], x);
+        BinaryPrimitives.WriteDoubleLittleEndian(s[20..], y);
+        BinaryPrimitives.WriteDoubleLittleEndian(s[28..], z);
+        BinaryPrimitives.WriteSingleLittleEndian(s[36..], qx);
+        BinaryPrimitives.WriteSingleLittleEndian(s[40..], qy);
+        BinaryPrimitives.WriteSingleLittleEndian(s[44..], qz);
+        BinaryPrimitives.WriteSingleLittleEndian(s[48..], qw);
+        compressedBlocks.CopyTo(outBuf, 52);
+        return outBuf;
+    }
+
+    public static EntitySpawnData DecodeEntitySpawn(ReadOnlyMemory<byte> message)
+    {
+        var s = message.Span;
+        return new EntitySpawnData(
+            BinaryPrimitives.ReadUInt32LittleEndian(s[1..]),
+            s[5],
+            BinaryPrimitives.ReadUInt16LittleEndian(s[6..]),
+            BinaryPrimitives.ReadUInt16LittleEndian(s[8..]),
+            BinaryPrimitives.ReadUInt16LittleEndian(s[10..]),
+            BinaryPrimitives.ReadDoubleLittleEndian(s[12..]),
+            BinaryPrimitives.ReadDoubleLittleEndian(s[20..]),
+            BinaryPrimitives.ReadDoubleLittleEndian(s[28..]),
+            BinaryPrimitives.ReadSingleLittleEndian(s[36..]),
+            BinaryPrimitives.ReadSingleLittleEndian(s[40..]),
+            BinaryPrimitives.ReadSingleLittleEndian(s[44..]),
+            BinaryPrimitives.ReadSingleLittleEndian(s[48..]),
+            message[52..]);
+    }
+
+    public readonly record struct EntityState(
+        uint Id, float X, float Y, float Z, float Qx, float Qy, float Qz, float Qw, float Vx, float Vy, float Vz);
+
+    public static byte[] EncodeEntityStates(IReadOnlyList<EntityState> entities)
+    {
+        var outBuf = new byte[3 + entities.Count * 44];
+        outBuf[0] = (byte)Msg.EntityState;
+        BinaryPrimitives.WriteUInt16LittleEndian(outBuf.AsSpan(1), (ushort)entities.Count);
+        for (int i = 0; i < entities.Count; i++)
+        {
+            int o = 3 + i * 44;
+            var e = entities[i];
+            var s = outBuf.AsSpan(o);
+            BinaryPrimitives.WriteUInt32LittleEndian(s, e.Id);
+            BinaryPrimitives.WriteSingleLittleEndian(s[4..], e.X);
+            BinaryPrimitives.WriteSingleLittleEndian(s[8..], e.Y);
+            BinaryPrimitives.WriteSingleLittleEndian(s[12..], e.Z);
+            BinaryPrimitives.WriteSingleLittleEndian(s[16..], e.Qx);
+            BinaryPrimitives.WriteSingleLittleEndian(s[20..], e.Qy);
+            BinaryPrimitives.WriteSingleLittleEndian(s[24..], e.Qz);
+            BinaryPrimitives.WriteSingleLittleEndian(s[28..], e.Qw);
+            BinaryPrimitives.WriteSingleLittleEndian(s[32..], e.Vx);
+            BinaryPrimitives.WriteSingleLittleEndian(s[36..], e.Vy);
+            BinaryPrimitives.WriteSingleLittleEndian(s[40..], e.Vz);
+        }
+        return outBuf;
+    }
+
+    public static EntityState[] DecodeEntityStates(ReadOnlySpan<byte> message)
+    {
+        int count = BinaryPrimitives.ReadUInt16LittleEndian(message[1..]);
+        var entities = new EntityState[count];
+        for (int i = 0; i < count; i++)
+        {
+            int o = 3 + i * 44;
+            entities[i] = new EntityState(
+                BinaryPrimitives.ReadUInt32LittleEndian(message[o..]),
+                BinaryPrimitives.ReadSingleLittleEndian(message[(o + 4)..]),
+                BinaryPrimitives.ReadSingleLittleEndian(message[(o + 8)..]),
+                BinaryPrimitives.ReadSingleLittleEndian(message[(o + 12)..]),
+                BinaryPrimitives.ReadSingleLittleEndian(message[(o + 16)..]),
+                BinaryPrimitives.ReadSingleLittleEndian(message[(o + 20)..]),
+                BinaryPrimitives.ReadSingleLittleEndian(message[(o + 24)..]),
+                BinaryPrimitives.ReadSingleLittleEndian(message[(o + 28)..]),
+                BinaryPrimitives.ReadSingleLittleEndian(message[(o + 32)..]),
+                BinaryPrimitives.ReadSingleLittleEndian(message[(o + 36)..]),
+                BinaryPrimitives.ReadSingleLittleEndian(message[(o + 40)..]));
+        }
+        return entities;
+    }
+
+    public static byte[] EncodeEntityDespawn(uint id, bool becameBlocks)
+    {
+        var outBuf = new byte[6];
+        outBuf[0] = (byte)Msg.EntityDespawn;
+        BinaryPrimitives.WriteUInt32LittleEndian(outBuf.AsSpan(1), id);
+        outBuf[5] = (byte)(becameBlocks ? 1 : 0);
+        return outBuf;
+    }
+
+    public static (uint Id, bool BecameBlocks) DecodeEntityDespawn(ReadOnlySpan<byte> message)
+        => (BinaryPrimitives.ReadUInt32LittleEndian(message[1..]), message[5] == 1);
 
     // ---- TimeSync -------------------------------------------------------------
 

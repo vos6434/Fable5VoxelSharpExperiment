@@ -68,6 +68,8 @@ public sealed class Game
     private readonly FlyCamera _camera = new();
     private readonly RemotePlayers _players = new();
     private readonly ClientClock _clock = new();
+    private EntityRenderer _entities = null!;
+    private static readonly float[] IdentityMat = Mat4.Identity();
 
     private Settings _settings = null!;
     private PlayerInventory _inventory = null!;
@@ -230,6 +232,7 @@ public sealed class Game
 
         _generator = new WorldGen(_connection.Seed, _data.Blocks);
         _world = new StreamingWorld(_gl, _data, _connection);
+        _entities = new EntityRenderer(_gl, _data);
 
         if (_options.ForceTimeTicks is long forced)
         {
@@ -391,6 +394,7 @@ public sealed class Game
         {
             _world.HandleEvent(evt);
             _players.Handle(evt, _connection.PlayerId);
+            _entities.Handle(evt);
             if (evt is ServerEvent.TimeSynced sync)
             {
                 _clock.OnSync(sync.WorldTick, sync.Timescale, sync.DayLengthTicks);
@@ -401,6 +405,7 @@ public sealed class Game
         _occupancy.Update(_world, _camera.X, _camera.Y, _camera.Z, uploadBudget: 24);
         _lights.Update(_world, _occupancy.OriginChunk, dt);
         _players.Update((float)dt);
+        _entities.Update((float)dt);
         _target = Aim();
 
         // Position sync at 10 Hz.
@@ -566,6 +571,7 @@ public sealed class Game
 
         // Solid pass: opaque + alpha-tested cutout, backface culled.
         _shader.SetFloat("uAlphaTest", 0.5f);
+        _shader.SetMatrix("uModel", IdentityMat); // chunks use identity; entities override
         _gl.Enable(EnableCap.CullFace);
         _gl.Disable(EnableCap.Blend);
         _gl.DepthMask(true);
@@ -577,6 +583,12 @@ public sealed class Game
             triangles += mesh.IndexCount / 3;
             draws++;
         }
+
+        // Physics entities (plan 03): opaque, same lighting uniforms, own model
+        // matrix. Drawn in the opaque phase for correct depth vs translucency.
+        draws += _entities.Count;
+        _entities.Render(_shader);
+        _shader.SetMatrix("uModel", IdentityMat); // restore for the chunk liquid/translucent passes
 
         // Liquid surfaces (water/lava tops): alpha blend with depth writes.
         // Depth-write keeps each pixel a single blend; adjacent chunks' quads
@@ -656,7 +668,7 @@ public sealed class Game
             $"fps {_lastFps}  draws {draws}  tris {triangles}",
             $"online as {_playerName} (#{_connection.PlayerId})  players {_players.Count + 1}  |  {_clock.Describe()}",
             $"pos {_camera.X:F1} {_camera.Y:F1} {_camera.Z:F1}  biome {_generator.BiomeAt(_camera.X, _camera.Y, _camera.Z)}",
-            $"chunks {stats.Loaded} loaded, {stats.Rendered} rendered  net {stats.AwaitingNet}  mesh {stats.PendingMesh} ({stats.Workers} workers)",
+            $"chunks {stats.Loaded} loaded, {stats.Rendered} rendered  net {stats.AwaitingNet}  mesh {stats.PendingMesh} ({stats.Workers} workers)  entities {_entities.Count}",
             $"hand {(held is null ? "empty" : _inventory.DisplayNameOf(held.Id))}  |  render distance {StreamingWorld.RenderRadius}",
             $"gpu  sky {_timerSky.Milliseconds:F2}ms  world {_timerWorld.Milliseconds:F2}ms  ui {_timerUi.Milliseconds:F2}ms",
         ];

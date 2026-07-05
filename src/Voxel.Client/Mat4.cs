@@ -23,6 +23,33 @@ public static class Mat4
         return r;
     }
 
+    public static float[] Identity()
+    {
+        var m = new float[16];
+        m[0] = m[5] = m[10] = m[15] = 1f;
+        return m;
+    }
+
+    public static float[] Translation(float x, float y, float z)
+    {
+        var m = Identity();
+        m[12] = x; m[13] = y; m[14] = z;
+        return m;
+    }
+
+    /// <summary>Column-major rotation matrix from a quaternion.</summary>
+    public static float[] FromQuaternion(float x, float y, float z, float w)
+    {
+        float xx = x * x, yy = y * y, zz = z * z;
+        float xy = x * y, xz = x * z, yz = y * z;
+        float wx = w * x, wy = w * y, wz = w * z;
+        var m = Identity();
+        m[0] = 1 - 2 * (yy + zz); m[1] = 2 * (xy + wz);     m[2] = 2 * (xz - wy);
+        m[4] = 2 * (xy - wz);     m[5] = 1 - 2 * (xx + zz); m[6] = 2 * (yz + wx);
+        m[8] = 2 * (xz + wy);     m[9] = 2 * (yz - wx);     m[10] = 1 - 2 * (xx + yy);
+        return m;
+    }
+
     public static float[] PerspectiveGl(float fovYRadians, float aspect, float near, float far)
     {
         float f = 1f / MathF.Tan(fovYRadians / 2f);

@@ -19,6 +19,10 @@ public abstract record ServerEvent
     public sealed record PlayerLeft(int Id) : ServerEvent;
     public sealed record PlayerMoved(PlayerMove[] Moves) : ServerEvent;
     public sealed record TimeSynced(long WorldTick, float Timescale, int DayLengthTicks) : ServerEvent;
+    public sealed record EntitySpawned(uint Id, byte Kind, int DimX, int DimY, int DimZ,
+        double X, double Y, double Z, float Qx, float Qy, float Qz, float Qw, ushort[] Blocks) : ServerEvent;
+    public sealed record EntityStates(Protocol.EntityState[] States) : ServerEvent;
+    public sealed record EntityDespawned(uint Id, bool BecameBlocks) : ServerEvent;
     public sealed record Disconnected(string Reason) : ServerEvent;
 }
 
@@ -180,6 +184,26 @@ public sealed class Connection : IDisposable
             {
                 var (worldTick, timescale, dayLength) = Protocol.DecodeTimeSync(message);
                 Events.Enqueue(new ServerEvent.TimeSynced(worldTick, timescale, dayLength));
+                break;
+            }
+            case Msg.EntitySpawn:
+            {
+                var d = Protocol.DecodeEntitySpawn(message);
+                int volume = d.DimX * d.DimY * d.DimZ;
+                byte[] raw = InflateRaw(d.CompressedBlocks.Span);
+                var blocks = new ushort[volume];
+                Buffer.BlockCopy(raw, 0, blocks, 0, Math.Min(raw.Length, volume * 2));
+                Events.Enqueue(new ServerEvent.EntitySpawned(
+                    d.Id, d.Kind, d.DimX, d.DimY, d.DimZ, d.X, d.Y, d.Z, d.Qx, d.Qy, d.Qz, d.Qw, blocks));
+                break;
+            }
+            case Msg.EntityState:
+                Events.Enqueue(new ServerEvent.EntityStates(Protocol.DecodeEntityStates(message)));
+                break;
+            case Msg.EntityDespawn:
+            {
+                var (id, became) = Protocol.DecodeEntityDespawn(message);
+                Events.Enqueue(new ServerEvent.EntityDespawned(id, became));
                 break;
             }
             default:

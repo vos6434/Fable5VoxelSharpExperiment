@@ -6,8 +6,8 @@ same discipline used for the original build and the port).
 
 | # | Plan | Size | Depends on |
 |---|------|------|------------|
-| 1 | [Tick system & timescale](01-tick-system.md) | S | — |
-| 2 | [Colored lighting, shadows, day/night](02-lighting-shadows-day-night.md) | XL | 1 (time of day) |
+| 1 | [Tick system & timescale](01-tick-system.md) ✅ SHIPPED | S | — |
+| 2 | [Colored lighting, shadows, day/night](02-lighting-shadows-day-night.md) ✅ SHIPPED | XL | 1 (time of day) |
 | 3 | [Physics contraptions, glue & physics gun](03-physics-contraptions.md) | XL | 1 (simulation step) |
 | 4 | [Chunk & contraption LOD](04-lod.md) | L | 3 (contraption half) |
 | 5 | [Minimap & world map](05-maps.md) | M | 3 (contraption markers) |

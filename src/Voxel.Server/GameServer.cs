@@ -1,4 +1,7 @@
+using System.Collections.Concurrent;
+using System.IO.Compression;
 using System.Net.WebSockets;
+using System.Numerics;
 using System.Threading.Channels;
 using Voxel.Shared;
 
@@ -31,6 +34,9 @@ public sealed class GameServer
     private readonly BlockRegistry _blocks;
     private readonly WorldGen _generator;
     private readonly WorldClock _clock;
+    private readonly PhysicsWorld _physics = new();
+    private readonly ConcurrentQueue<Action> _tickActions = new();
+    private readonly ConcurrentDictionary<uint, byte[]> _spawnPayloads = new();
     private readonly Lock _worldLock = new();
     private readonly Lock _clientsLock = new();
     private readonly Dictionary<int, Client> _clients = new();
@@ -49,12 +55,65 @@ public sealed class GameServer
     /// <summary>Runs on the clock thread — the server's simulation heartbeat.</summary>
     private void HandleTick(long worldTick)
     {
-        if (worldTick % 2 == 0) BroadcastMoves();           // 10 Hz position relay
+        // Physics + entity mutations happen only here (Bepu isn't thread-safe);
+        // console/network requests enqueue actions the tick thread drains.
+        while (_tickActions.TryDequeue(out var action)) action();
+        _physics.Step((float)ClockCore.TickSeconds);
+
+        if (worldTick % 2 == 0)                              // 10 Hz relay
+        {
+            BroadcastMoves();
+            BroadcastEntityStates();
+        }
         if (worldTick % 100 == 0)
         {
             BroadcastTimeSync();                             // drift guard
             lock (_worldLock) _store.SetMeta("worldTime", worldTick.ToString());
         }
+    }
+
+    // ---- Physics entities (plan 03) -------------------------------------------
+
+    /// <summary>Thread-safe: queues a debug-box spawn onto the tick thread.</summary>
+    public void RequestSpawnDebugBox(Vector3 position, ushort blockId)
+    {
+        _tickActions.Enqueue(() =>
+        {
+            var entity = _physics.SpawnDebugBox(position, blockId);
+            var (pos, rot, _) = _physics.GetState(entity);
+            byte[] payload = EncodeSpawn(entity, pos, rot);
+            _spawnPayloads[entity.Id] = payload; // cached for players who join later
+            Broadcast(payload);
+            Console.WriteLine($"[server] spawned debug body #{entity.Id} at {position}");
+        });
+    }
+
+    private static byte[] EncodeSpawn(PhysicsWorld.Entity e, Vector3 pos, Quaternion rot)
+    {
+        byte[] raw = new byte[e.Blocks.Length * 2];
+        Buffer.BlockCopy(e.Blocks, 0, raw, 0, raw.Length);
+        using var output = new MemoryStream();
+        using (var deflate = new DeflateStream(output, CompressionLevel.Fastest, leaveOpen: true))
+        {
+            deflate.Write(raw);
+        }
+        return Protocol.EncodeEntitySpawn(
+            e.Id, e.Kind, e.DimX, e.DimY, e.DimZ,
+            pos.X, pos.Y, pos.Z, rot.X, rot.Y, rot.Z, rot.W, output.ToArray());
+    }
+
+    private void BroadcastEntityStates()
+    {
+        var entities = _physics.Entities;
+        if (entities.Count == 0) return;
+        var states = new List<Protocol.EntityState>(entities.Count);
+        foreach (var e in entities.Values)
+        {
+            var (pos, rot, vel) = _physics.GetState(e);
+            states.Add(new Protocol.EntityState(
+                e.Id, pos.X, pos.Y, pos.Z, rot.X, rot.Y, rot.Z, rot.W, vel.X, vel.Y, vel.Z));
+        }
+        Broadcast(Protocol.EncodeEntityStates(states));
     }
 
     private void BroadcastTimeSync()
@@ -142,6 +201,13 @@ public sealed class GameServer
         };
         client.Outbox.Writer.TryWrite(Protocol.EncodeJson(Msg.Welcome, welcome));
         client.Outbox.Writer.TryWrite(Protocol.EncodeTimeSync(_clock.WorldTick, _clock.Timescale, Constants.DayLengthTicks));
+
+        // Introduce existing physics entities (cached spawn payloads; live
+        // poses follow on the next EntityState broadcast).
+        foreach (var payload in _spawnPayloads.Values)
+        {
+            client.Outbox.Writer.TryWrite(payload);
+        }
 
         lock (_clientsLock)
         {

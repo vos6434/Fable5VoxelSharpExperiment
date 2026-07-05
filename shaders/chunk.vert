@@ -6,6 +6,7 @@ layout(location = 1) in vec2 aUv;
 layout(location = 2) in vec2 aMeta; // x = atlas layer, y = face brightness
 
 uniform mat4 uViewProj;
+uniform mat4 uModel;      // identity for chunks; TRS for physics entities (plan 03)
 uniform vec3 uChunkOrigin;
 uniform vec3 uCameraPos;
 
@@ -15,7 +16,9 @@ out float vFogDepth;
 out vec3 vWorldPos;
 
 void main() {
-    vec3 world = aPosition + uChunkOrigin;
+    // Chunks: uModel = identity, so world = aPosition + uChunkOrigin.
+    // Entities: uChunkOrigin = 0 and uModel = the entity's world transform.
+    vec3 world = (uModel * vec4(aPosition, 1.0)).xyz + uChunkOrigin;
     vUv = aUv;
     vMeta = aMeta;
     vWorldPos = world;

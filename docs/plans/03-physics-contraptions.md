@@ -103,6 +103,18 @@ and throws them. Server-authoritative, multiplayer-correct.
 1. **Bepu bootstrap** — simulation in the tick loop; a debug 1-block body
    spawned by console command, synced via the new entity messages, rendered
    and interpolated client-side. (Protocol + render path proven end-to-end.)
+   **DONE (2026-07-05).** BepuPhysics 2.4 `Simulation` stepped once per world
+   tick (physics + entity mutations run only on the tick thread; console/net
+   requests enqueue actions). Protocol v4: EntitySpawn (deflated grid +
+   pose) / EntityState (batched pos/quat/vel at 10 Hz) / EntityDespawn, all
+   round-trip tested. `spawn [x y z]` console command drops a stone box onto
+   a temporary raised static floor (M2 replaces it with voxel colliders).
+   Client `EntityRenderer` meshes the grid (simple per-block cube mesher —
+   the greedy mesher is 16³-only), draws with a `uModel` TRS matrix through
+   the chunk shader (lit by the world, no self-occlusion), and interpolates
+   pose between states. Verified: box spawned at y=20 renders at its settled
+   y≈13 (so streaming + interpolation, not just the spawn pose). Joining
+   players get cached spawn payloads. 59 tests.
 2. **Terrain collision** — the debug body lands on and rolls down real
    terrain; static-collider cache with edit invalidation.
 3. **Glue → contraption** — mark/flood/validate/spawn; a glued tower falls
