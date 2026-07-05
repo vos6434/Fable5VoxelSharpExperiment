@@ -16,6 +16,8 @@ public sealed record GameOptions
     public int ScreenshotAfterFrames { get; init; } = 90;
     public (double X, double Y, double Z)? StartPosition { get; init; }
     public (float Yaw, float Pitch)? StartLook { get; init; }
+    /// <summary>Verification hook: after streaming settles, place a glowstone column and break a block via the interaction code path.</summary>
+    public bool DemoEdits { get; init; }
 }
 
 /// <summary>
@@ -42,8 +44,17 @@ public sealed class Game
     private WorldGen _generator = null!;   // display only: biome readout + hell boundary
     private StreamingWorld _world = null!;
     private GlShader _shader = null!;
+    private GlShader _colorShader = null!;
+    private ColorMesh _cubeLines = null!;
+    private ColorMesh _cubeTriangles = null!;
     private uint _atlasTexture;
     private readonly FlyCamera _camera = new();
+    private readonly RemotePlayers _players = new();
+
+    private const float Reach = 6f;
+    private List<BlockDefinition> _placeable = null!;
+    private int _selected;
+    private RaycastHit? _target;
 
     private System.Numerics.Vector2 _lastMouse;
     private bool _firstMouse = true;
@@ -85,13 +96,23 @@ public sealed class Game
             _camera.ApplyMouseDelta(pos.X - _lastMouse.X, pos.Y - _lastMouse.Y);
             _lastMouse = pos;
         };
-        mouse.MouseDown += (m, _) =>
+        mouse.MouseDown += (m, button) =>
         {
             if (!_camera.Captured)
             {
+                // First click only captures; interactions need an already-captured mouse.
                 _camera.Captured = true;
                 m.Cursor.CursorMode = CursorMode.Disabled;
+                return;
             }
+            if (button == MouseButton.Left) BreakTargeted();
+            else if (button == MouseButton.Right) PlaceAtTarget();
+        };
+        mouse.Scroll += (_, wheel) =>
+        {
+            if (!_camera.Captured || _placeable is null) return;
+            int dir = wheel.Y < 0 ? 1 : -1;
+            _selected = (_selected + dir + _placeable.Count) % _placeable.Count;
         };
         _keyboard.KeyDown += (_, key, _) =>
         {
@@ -99,7 +120,16 @@ public sealed class Game
             {
                 _camera.Captured = false;
                 mouse.Cursor.CursorMode = CursorMode.Normal;
+                return;
             }
+            // 1-9, 0 select from the placeable list (temporary until the P6 hotbar).
+            int? slot = key switch
+            {
+                >= Key.Number1 and <= Key.Number9 => key - Key.Number1,
+                Key.Number0 => 9,
+                _ => null,
+            };
+            if (slot is int s && _placeable is not null && s < _placeable.Count) _selected = s;
         };
 
         _data = ClientData.Load(Path.Combine(_options.RepoRoot, "data"));
@@ -127,8 +157,59 @@ public sealed class Game
             _gl,
             File.ReadAllText(Path.Combine(_options.RepoRoot, "shaders", "chunk.vert")),
             File.ReadAllText(Path.Combine(_options.RepoRoot, "shaders", "chunk.frag")));
+        _colorShader = new GlShader(
+            _gl,
+            File.ReadAllText(Path.Combine(_options.RepoRoot, "shaders", "color.vert")),
+            File.ReadAllText(Path.Combine(_options.RepoRoot, "shaders", "color.frag")));
+        _cubeLines = ColorMesh.UnitCubeLines(_gl);
+        _cubeTriangles = ColorMesh.UnitCubeTriangles(_gl);
         _atlasTexture = CreateAtlasTexture();
         _gl.Enable(EnableCap.DepthTest);
+
+        _placeable = _data.Blocks.Defs.Where(d => d.NumericId != 0).ToList();
+        _selected = _placeable.FindIndex(d => d.StringId == "stone");
+        if (_selected < 0) _selected = 0;
+    }
+
+    // ---- interaction ---------------------------------------------------------
+
+    private (double X, double Y, double Z) AimDirection()
+    {
+        float cy = MathF.Cos(_camera.Yaw), sy = MathF.Sin(_camera.Yaw);
+        float cp = MathF.Cos(_camera.Pitch), sp = MathF.Sin(_camera.Pitch);
+        return (-sy * cp, sp, -cy * cp);
+    }
+
+    private bool IsTargetable(int x, int y, int z)
+    {
+        ushort id = _world.GetBlock(x, y, z);
+        return id != 0 && _data.Blocks.Get(id).Collision != Collision.Liquid;
+    }
+
+    private RaycastHit? Aim()
+    {
+        var (dx, dy, dz) = AimDirection();
+        return Raycast.Cast(_camera.X, _camera.Y, _camera.Z, dx, dy, dz, Reach, IsTargetable);
+    }
+
+    private void BreakTargeted()
+    {
+        if (Aim() is not RaycastHit hit) return;
+        // Predict locally; the server echo confirms.
+        _world.SetBlock(hit.X, hit.Y, hit.Z, 0);
+        _connection.SendSetBlock(hit.X, hit.Y, hit.Z, 0);
+    }
+
+    private void PlaceAtTarget()
+    {
+        if (Aim() is not RaycastHit hit) return;
+        int px = hit.X + hit.Nx;
+        int py = hit.Y + hit.Ny;
+        int pz = hit.Z + hit.Nz;
+        if (_world.GetBlock(px, py, pz) != 0) return;
+        ushort id = (ushort)_placeable[_selected].NumericId;
+        _world.SetBlock(px, py, pz, id);
+        _connection.SendSetBlock(px, py, pz, id);
     }
 
     private unsafe uint CreateAtlasTexture()
@@ -152,14 +233,42 @@ public sealed class Game
     private void OnUpdate(double dt)
     {
         _camera.Update(_keyboard, (float)dt);
-        _world.Update(_camera.X, _camera.Y, _camera.Z);
 
-        // Position sync at 10 Hz (P5 renders the other players).
+        // Route server events: world takes chunks/blocks, players take the rest.
+        while (_connection.Events.TryDequeue(out var evt))
+        {
+            _world.HandleEvent(evt);
+            _players.Handle(evt, _connection.PlayerId);
+        }
+
+        _world.Update(_camera.X, _camera.Y, _camera.Z);
+        _players.Update((float)dt);
+        _target = Aim();
+
+        // Position sync at 10 Hz.
         _moveSendTimer += dt;
         if (_moveSendTimer >= 0.1)
         {
             _moveSendTimer = 0;
             _connection.SendMove(_camera.X, _camera.Y, _camera.Z, _camera.Yaw, _camera.Pitch);
+        }
+
+        // Verification hook: exercise the real break/place path once streaming settles.
+        if (_options.DemoEdits && _frameCount == 240)
+        {
+            var (dx, dy, dz) = AimDirection();
+            int bx = (int)Math.Floor(_camera.X + dx * 8);
+            int bz = (int)Math.Floor(_camera.Z + dz * 8);
+            ushort glow = _data.Blocks.Resolve("glowstone");
+            int surface = _generator.SurfaceHeight(bx, bz);
+            for (int i = 1; i <= 3; i++)
+            {
+                _world.SetBlock(bx, surface + i, bz, glow);
+                _connection.SendSetBlock(bx, surface + i, bz, glow);
+            }
+            _world.SetBlock(bx + 2, surface, bz, 0);
+            _connection.SendSetBlock(bx + 2, surface, bz, 0);
+            Console.WriteLine($"[client] demo edits at ({bx}, {surface + 1}..{surface + 3}, {bz}) + break ({bx + 2}, {surface}, {bz})");
         }
     }
 
@@ -223,6 +332,28 @@ public sealed class Game
             draws++;
         }
         _gl.DepthMask(true);
+        _gl.Disable(EnableCap.Blend);
+
+        // Flat-color pass: remote players, then the block target outline.
+        _colorShader.Use();
+        _colorShader.SetMatrix("uViewProj", viewProj);
+        _gl.Enable(EnableCap.CullFace);
+        foreach (var p in _players.All)
+        {
+            if (!p.Seen) continue;
+            _colorShader.SetVec3("uOrigin", p.X - 0.3f, p.Y - 0.9f, p.Z - 0.3f);
+            _colorShader.SetVec3("uScale", 0.6f, 1.8f, 0.6f);
+            _colorShader.SetFloat4("uColor", p.Color.R, p.Color.G, p.Color.B, 1f);
+            _cubeTriangles.Draw();
+            draws++;
+        }
+        if (_target is RaycastHit target)
+        {
+            _colorShader.SetVec3("uOrigin", target.X - 0.001f, target.Y - 0.001f, target.Z - 0.001f);
+            _colorShader.SetVec3("uScale", 1.002f, 1.002f, 1.002f);
+            _colorShader.SetFloat4("uColor", 0.07f, 0.07f, 0.07f, 1f);
+            _cubeLines.Draw();
+        }
 
         _frameCount++;
         _fpsFrames++;
@@ -234,6 +365,7 @@ public sealed class Game
                 $"Fable5VoxelSharp - {_fpsFrames} fps - {draws} draws {triangles} tris - " +
                 $"pos {_camera.X:F0} {_camera.Y:F0} {_camera.Z:F0} - " +
                 $"biome {_generator.BiomeAt(_camera.X, _camera.Y, _camera.Z)} - " +
+                $"players {_players.Count + 1} - hand {_placeable[_selected].Name} - " +
                 $"chunks {s.Loaded} loaded {s.Rendered} rendered, net {s.AwaitingNet} mesh {s.PendingMesh}";
             _fpsFrames = 0;
             _fpsTimer = 0;

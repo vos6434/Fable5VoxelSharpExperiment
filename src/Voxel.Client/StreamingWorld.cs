@@ -90,10 +90,28 @@ public sealed class StreamingWorld : IDisposable
             UnloadFar();
         }
 
-        DrainNetwork();
         RequestSome();
         ScheduleMeshes();
         _pool.DrainResults(MaxUploadsPerFrame, ApplyMeshResult);
+    }
+
+    /// <summary>World-related server events, routed here by the Game's event drain.</summary>
+    public void HandleEvent(ServerEvent evt)
+    {
+        switch (evt)
+        {
+            case ServerEvent.Chunk chunk:
+                OnChunk(chunk);
+                break;
+            case ServerEvent.BlockUpdated update:
+                SetBlock(update.X, update.Y, update.Z, update.BlockId);
+                break;
+            case ServerEvent.Disconnected d:
+                DisconnectReason = d.Reason;
+                break;
+            default:
+                break;
+        }
     }
 
     public IEnumerable<(int Cx, int Cy, int Cz, ChunkMesh Mesh)> SolidMeshes()
@@ -147,28 +165,6 @@ public sealed class StreamingWorld : IDisposable
     {
         entry.MeshVersion++;
         if (!entry.Empty || entry.Solid is not null) entry.State = MeshState.None;
-    }
-
-    private void DrainNetwork()
-    {
-        while (_connection.Events.TryDequeue(out var evt))
-        {
-            switch (evt)
-            {
-                case ServerEvent.Chunk chunk:
-                    OnChunk(chunk);
-                    break;
-                case ServerEvent.BlockUpdated update:
-                    SetBlock(update.X, update.Y, update.Z, update.BlockId);
-                    break;
-                case ServerEvent.Disconnected d:
-                    DisconnectReason = d.Reason;
-                    break;
-                default:
-                    // Player events are consumed in P5.
-                    break;
-            }
-        }
     }
 
     private void OnChunk(ServerEvent.Chunk chunk)

@@ -13,6 +13,7 @@ int screenshotFrames = 90;
 Uri server = new($"ws://localhost:{Protocol.Port}");
 (double, double, double)? startPos = null;
 (float, float)? startLook = null;
+bool demoEdits = false;
 
 double D(string s) => double.Parse(s, CultureInfo.InvariantCulture);
 float F(string s) => float.Parse(s, CultureInfo.InvariantCulture);
@@ -26,6 +27,7 @@ for (int i = 0; i < args.Length; i++)
         case "--frames": screenshotFrames = int.Parse(args[++i]); break;
         case "--pos": startPos = (D(args[++i]), D(args[++i]), D(args[++i])); break;
         case "--look": startLook = (F(args[++i]), F(args[++i])); break;
+        case "--demo-edits": demoEdits = true; break;
         default: throw new ArgumentException($"unknown argument {args[i]}");
     }
 }
@@ -53,4 +55,5 @@ new Game(new GameOptions
     ScreenshotAfterFrames = screenshotFrames,
     StartPosition = startPos,
     StartLook = startLook,
+    DemoEdits = demoEdits,
 }).Run();

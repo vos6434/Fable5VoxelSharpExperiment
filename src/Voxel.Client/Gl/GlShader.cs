@@ -57,6 +57,8 @@ public sealed class GlShader : IDisposable
 
     public void SetVec3(string name, float x, float y, float z) => _gl.Uniform3(Location(name), x, y, z);
 
+    public void SetFloat4(string name, float x, float y, float z, float w) => _gl.Uniform4(Location(name), x, y, z, w);
+
     public void SetFloat(string name, float v) => _gl.Uniform1(Location(name), v);
 
     public void SetInt(string name, int v) => _gl.Uniform1(Location(name), v);
