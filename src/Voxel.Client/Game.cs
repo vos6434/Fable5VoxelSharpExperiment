@@ -57,6 +57,7 @@ public sealed class Game
     private uint _atlasTexture;
     private PostChain _postChain = null!;
     private SkyRenderer _skyRenderer = null!;
+    private OccupancyVolume _occupancy = null!;
     private GpuTimer _timerSky = null!;
     private GpuTimer _timerWorld = null!;
     private GpuTimer _timerUi = null!;
@@ -240,6 +241,7 @@ public sealed class Game
         string shaderDir = Path.Combine(_options.RepoRoot, "shaders");
         _postChain = new PostChain(_gl, shaderDir, _window.FramebufferSize.X, _window.FramebufferSize.Y);
         _skyRenderer = new SkyRenderer(_gl, shaderDir);
+        _occupancy = new OccupancyVolume(_gl, _data.Blocks.Opaque);
         _timerSky = new GpuTimer(_gl, "sky");
         _timerWorld = new GpuTimer(_gl, "world");
         _timerUi = new GpuTimer(_gl, "ui");
@@ -344,6 +346,7 @@ public sealed class Game
         }
 
         _world.Update(_camera.X, _camera.Y, _camera.Z);
+        _occupancy.Update(_world, _camera.X, _camera.Y, _camera.Z, uploadBudget: 24);
         _players.Update((float)dt);
         _target = Aim();
 
@@ -408,6 +411,12 @@ public sealed class Game
         // World ambient: day/night curve on the surface, a fixed glow in hell.
         float dayBrightness = 0.16f + 0.84f * sky.DayAmount;
         float worldBrightness = dayBrightness + (0.6f - dayBrightness) * hellT;
+        // Split brightness into an ambient floor + the sun term that shadows
+        // remove. sunUp fades the directional light out below the horizon and
+        // underground (hell has no sun).
+        float sunUp = SkyState.Smoothstep(-0.02f, 0.15f, sky.SunDir.Y) * (1f - hellT);
+        float sunStrength = worldBrightness * 0.45f * sunUp;
+        float ambient = worldBrightness - sunStrength;
 
         // Camera basis for the sky ray reconstruction.
         var (fx, fy, fz) = AimDirection();
@@ -435,10 +444,17 @@ public sealed class Game
         _shader.SetVec3("uFogColor", horizon.R, horizon.G, horizon.B);
         _shader.SetFloat("uFogNear", fogNear);
         _shader.SetFloat("uFogFar", fogFar);
-        _shader.SetFloat("uDayBrightness", worldBrightness);
+        _shader.SetFloat("uAmbient", ambient);
+        _shader.SetFloat("uSunStrength", sunStrength);
+        _shader.SetVec3("uSunDir", sky.SunDir.X, sky.SunDir.Y, sky.SunDir.Z);
         _shader.SetInt("uAtlas", 0);
         _gl.ActiveTexture(TextureUnit.Texture0);
         _gl.BindTexture(TextureTarget.Texture2DArray, _atlasTexture);
+        _shader.SetInt("uOccupancy", 1);
+        _occupancy.Bind(TextureUnit.Texture1);
+        var (ox, oy, oz) = _occupancy.OriginWorld;
+        _shader.SetVec3("uOccupancyOrigin", ox, oy, oz);
+        _shader.SetFloat("uOccupancySize", OccupancyVolume.Size);
 
         long triangles = 0;
         int draws = 0;

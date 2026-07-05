@@ -80,6 +80,19 @@ public sealed class StreamingWorld : IDisposable
             : (ushort)0;
     }
 
+    /// <summary>Raw block array for a loaded chunk (for the occupancy volume); null if not loaded.</summary>
+    public ushort[]? ChunkBlocks(int cx, int cy, int cz)
+        => _chunks.TryGetValue((cx, cy, cz), out var e) ? e.Data.Blocks : null;
+
+    /// <summary>Chunk coords edited since the last drain (occupancy volume re-uploads these).</summary>
+    private readonly HashSet<(int, int, int)> _occupancyDirty = new();
+
+    public void DrainOccupancyDirty(HashSet<(int, int, int)> into)
+    {
+        foreach (var key in _occupancyDirty) into.Add(key);
+        _occupancyDirty.Clear();
+    }
+
     public void Update(double camX, double camY, double camZ)
     {
         var center = (Coords.WorldToChunk(camX), Coords.WorldToChunk(camY), Coords.WorldToChunk(camZ));
@@ -146,6 +159,7 @@ public sealed class StreamingWorld : IDisposable
         entry.Data.Set(lx, ly, lz, blockId);
         if (blockId != 0) entry.Empty = false;
         MarkDirty(entry);
+        _occupancyDirty.Add((cx, cy, cz)); // this chunk's occupancy changed
 
         void Touch(int ncx, int ncy, int ncz)
         {

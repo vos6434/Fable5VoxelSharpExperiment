@@ -120,6 +120,11 @@ Three intertwined systems:
 3. **Sun ray shadows** — two-level DDA; **PERF GATE** (measured via M0
    timers): ≥ 60 fps at current view distance on the dev GPU, else pivot to
    fallback tier (CSM first).
+   **DONE (2026-07-05): GATE PASSED.** Single-level DDA (96 steps) through a
+   176^3 R8 occupancy volume costs 0.4-0.95 ms world-pass GPU time at 166 fps
+   (VSync-capped). CSM fallback NOT needed. Shadows verified rotating with
+   the sun (morning/afternoon slopes flip). Two-level coarse DDA deferred as
+   a future optimization — not required to hit the gate.
 4. **Emitters + clusters** — registry, cluster lists, unshadowed colored
    point lights (lightColor JSON live here).
 5. **Block-light shadow rays** — capped shadowed lights per cluster; the

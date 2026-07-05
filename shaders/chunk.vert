@@ -12,11 +12,13 @@ uniform vec3 uCameraPos;
 out vec2 vUv;
 out vec2 vMeta;
 out float vFogDepth;
+out vec3 vWorldPos;
 
 void main() {
     vec3 world = aPosition + uChunkOrigin;
     vUv = aUv;
     vMeta = aMeta;
+    vWorldPos = world;
     vFogDepth = distance(world, uCameraPos);
     gl_Position = uViewProj * vec4(world, 1.0);
 }

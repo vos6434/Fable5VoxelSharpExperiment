@@ -36,7 +36,7 @@ public readonly struct SkyState
     private static (float, float, float) Mix((float R, float G, float B) a, (float R, float G, float B) b, float t)
         => (a.R + (b.R - a.R) * t, a.G + (b.G - a.G) * t, a.B + (b.B - a.B) * t);
 
-    private static float Smoothstep(float e0, float e1, float x)
+    internal static float Smoothstep(float e0, float e1, float x)
     {
         float t = Math.Clamp((x - e0) / (e1 - e0), 0f, 1f);
         return t * t * (3f - 2f * t);
