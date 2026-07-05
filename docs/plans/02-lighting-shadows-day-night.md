@@ -187,6 +187,19 @@ Three intertwined systems:
    grazing-angle fade (smoothstep on N·L) removes hard-shadow sparkle where
    light skims bumpy hell ceilings; (5) block light fades out over the last
    12 blocks of the region instead of cutting to black at the boundary.
+
+   **FIXED (2026-07-05, residual ceiling stripe acne):** even after the
+   above, distant block-light shadow rays still aliased into row-by-row
+   stripes on hell ceilings — a 1-voxel bump 10+ blocks away either blocks
+   or clears a near-tangent ray depending on the fragment's sub-voxel
+   phase, flipping per row of ceiling voxels. Isolated by comparing
+   screenshots with `shadowedLightCap = 0` (stripes gone) vs 8 (stripes
+   present). Fix: block-light shadow *hardness* fades from 1 to 0 over
+   ray distance 10 → 15 blocks (`mix(1, ray, hardness)`), i.e. contact
+   shadows stay crisp and far lights degrade into soft area lights —
+   physically reasonable, since a lava pool at that range has a penumbra
+   wider than a block anyway. Row-banding energy metric on the repro view
+   dropped from 1.70 (before) to 1.29 (after; 1.17 with rays fully off).
 5. **Block-light shadow rays** — capped shadowed lights per cluster; the
    money shot: a pillar between a torch and a wall casts a moving shadow
    when the torch is re-placed.

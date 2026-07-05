@@ -183,9 +183,15 @@ vec3 blockLight(vec3 worldPos, vec3 normal) {
         if (grazing <= 0.0) continue;
 
         float vis = 1.0;
-        if (s < uShadowedLightCap) {
+        // Hard 1-voxel shadows alias into row-by-row stripe patterns at
+        // range (grazing rays flip per fragment row on bumpy hell ceilings),
+        // so fade the shadow term out over distance — a lava pool or
+        // glowstone cluster that far away is an area light whose penumbra
+        // exceeds a block anyway. Contact shadows (< 10 blocks) stay crisp.
+        float hardness = 1.0 - smoothstep(10.0, 15.0, dist);
+        if (s < uShadowedLightCap && hardness > 0.0) {
             vec3 lightOccRel = t.xyz + uLightsOrigin - uOccupancyOrigin;
-            vis = lightRay(occRel, lightOccRel, ldir);
+            vis = mix(1.0, lightRay(occRel, lightOccRel, ldir), hardness);
         }
         if (vis <= 0.0) continue;
         total += color * ((1.0 - dist / intensity) * (intensity / 15.0) * ndotl * grazing * vis);
