@@ -149,6 +149,7 @@ public sealed partial class PhysicsWorld : IDisposable
     {
         UpdateTerrainColliders();
         _sim.Timestep(dt);
+        ApplyBuoyancy(dt);
     }
 
     /// <summary>Ensures chunks near awake bodies have colliders; drops the rest.</summary>

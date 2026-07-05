@@ -60,13 +60,16 @@ public sealed class GameServer
         // fetch clones under the world lock so the tick thread reads a stable
         // copy while network SetBlocks may mutate the live chunk.
         var collides = new byte[blocks.Count];
+        var water = new byte[blocks.Count];
         foreach (var def in blocks.Defs)
         {
             collides[def.NumericId] = (byte)(def.Collision == Collision.Solid ? 1 : 0);
+            water[def.NumericId] = (byte)(def.StringId == "water" ? 1 : 0);
         }
         _physics.SetTerrainSource(
             (cx, cy, cz) => { lock (_worldLock) return (ushort[])_store.Load(cx, cy, cz).Blocks.Clone(); },
             collides);
+        _physics.SetWaterTable(water);
         _physics.OnGrabReleased = clientId =>
         {
             lock (_clientsLock)
