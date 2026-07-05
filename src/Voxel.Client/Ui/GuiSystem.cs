@@ -138,12 +138,35 @@ public sealed class GuiSystem : IDisposable
         {
             float w = asset.Width * Scale;
             float h = asset.Height * Scale;
-            var pos = ClampToScreen(
-                (_screenW - w) / 2 + _openOrder.Count * 40,
-                (_screenH - h) / 2 + _openOrder.Count * 40, w, h);
+            // Prefer a spot that doesn't overlap already-open windows (web parity).
+            var pos = ClampToScreen((_screenW - w) / 2, (_screenH - h) / 2, w, h);
+            for (int attempt = 0; attempt < 9; attempt++)
+            {
+                var candidate = ClampToScreen(
+                    (_screenW - w) / 2 + (attempt % 3 == 1 ? w + 24 : attempt % 3 == 2 ? -(w + 24) : 0) * ((attempt / 3) + 1) / 2f,
+                    (_screenH - h) / 2 + (attempt / 3) * 48, w, h);
+                if (!OverlapsOpenWindow(candidate.X, candidate.Y, w, h))
+                {
+                    pos = candidate;
+                    break;
+                }
+            }
             _settings.GuiPositions[id] = [pos.X, pos.Y];
         }
         _openOrder.Add(id);
+    }
+
+    private bool OverlapsOpenWindow(float x, float y, float w, float h)
+    {
+        foreach (string openId in _openOrder)
+        {
+            var other = _assets[openId];
+            var (ox, oy) = WindowPos(other);
+            float ow = other.Width * Scale;
+            float oh = other.Height * Scale;
+            if (x < ox + ow && x + w > ox && y < oy + oh && y + h > oy) return true;
+        }
+        return false;
     }
 
     public bool CloseAll()

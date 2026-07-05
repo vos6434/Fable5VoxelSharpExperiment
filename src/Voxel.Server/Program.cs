@@ -72,5 +72,11 @@ _ = Task.Run(async () =>
     }
 });
 
+app.Lifetime.ApplicationStopping.Register(() =>
+{
+    store.Dispose(); // flush WAL cleanly on shutdown
+    Console.WriteLine("[server] world store closed");
+});
+
 Console.WriteLine($"[server] game server listening on ws://0.0.0.0:{Protocol.Port}");
 app.Run();

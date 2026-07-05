@@ -73,6 +73,7 @@ public sealed class Game
     private int _fpsFrames;
     private int _lastFps;
     private double _moveSendTimer;
+    private readonly float[] _frustumPlanes = new float[24];
 
     public Game(GameOptions options)
     {
@@ -394,6 +395,12 @@ public sealed class Game
 
         long triangles = 0;
         int draws = 0;
+        Frustum.Extract(viewProj, _frustumPlanes);
+        const float chunkRadius = 13.86f; // sqrt(3) * 8, chunk bounding sphere
+        bool ChunkVisible(int cx, int cy, int cz) => Frustum.SphereVisible(
+            _frustumPlanes,
+            cx * Constants.ChunkSize + 8, cy * Constants.ChunkSize + 8, cz * Constants.ChunkSize + 8,
+            chunkRadius);
 
         // Solid pass: opaque + alpha-tested cutout, backface culled.
         _shader.SetFloat("uAlphaTest", 0.5f);
@@ -402,6 +409,7 @@ public sealed class Game
         _gl.DepthMask(true);
         foreach (var (cx, cy, cz, mesh) in _world.SolidMeshes())
         {
+            if (!ChunkVisible(cx, cy, cz)) continue;
             _shader.SetVec3("uChunkOrigin", cx * Constants.ChunkSize, cy * Constants.ChunkSize, cz * Constants.ChunkSize);
             mesh.Draw();
             triangles += mesh.IndexCount / 3;
@@ -416,6 +424,7 @@ public sealed class Game
         _gl.DepthMask(false);
         foreach (var (cx, cy, cz, mesh) in _world.TranslucentMeshes())
         {
+            if (!ChunkVisible(cx, cy, cz)) continue;
             _shader.SetVec3("uChunkOrigin", cx * Constants.ChunkSize, cy * Constants.ChunkSize, cz * Constants.ChunkSize);
             mesh.Draw();
             triangles += mesh.IndexCount / 3;
@@ -472,6 +481,18 @@ public sealed class Game
             _font.DrawShadowed(_uiBatch, size.X / 2f - _font.Measure("+") / 2, size.Y / 2f - _font.LineHeight / 2, "+");
         }
 
+        // Nametags above remote players (within ~48 blocks, projected to screen).
+        foreach (var p in _players.All)
+        {
+            if (!p.Seen) continue;
+            float ddx = p.X - _camera.X, ddy = p.Y - _camera.Y, ddz = p.Z - _camera.Z;
+            if (ddx * ddx + ddy * ddy + ddz * ddz > 48 * 48) continue;
+            if (ProjectToScreen(viewProj, p.X, p.Y + 1.25f, p.Z, size.X, size.Y) is (float sx, float sy))
+            {
+                _font.DrawShadowed(_uiBatch, sx - _font.Measure(p.Name) / 2, sy - _font.LineHeight, p.Name);
+            }
+        }
+
         _gui.Draw(_uiBatch, _font, _camera.Captured);
         _uiBatch.End();
         _gl.Enable(EnableCap.DepthTest);
@@ -503,6 +524,18 @@ public sealed class Game
             SaveScreenshot(_options.ScreenshotPath);
             _window.Close();
         }
+    }
+
+    private static (float X, float Y)? ProjectToScreen(float[] m, float x, float y, float z, int w, int h)
+    {
+        float cx = m[0] * x + m[4] * y + m[8] * z + m[12];
+        float cy = m[1] * x + m[5] * y + m[9] * z + m[13];
+        float cw = m[3] * x + m[7] * y + m[11] * z + m[15];
+        if (cw <= 0.1f) return null; // behind the camera
+        float sx = (cx / cw * 0.5f + 0.5f) * w;
+        float sy = (1f - (cy / cw * 0.5f + 0.5f)) * h;
+        if (sx < -100 || sx > w + 100 || sy < -50 || sy > h + 50) return null;
+        return (sx, sy);
     }
 
     private unsafe void SaveScreenshot(string path)

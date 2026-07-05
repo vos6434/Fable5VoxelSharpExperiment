@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Voxel.Shared\Voxel.Shared.csproj" />
+    <ProjectReference Include="..\..\src\Voxel.Client\Voxel.Client.csproj" />
   </ItemGroup>
 
   <ItemGroup>
