@@ -1,6 +1,3 @@
-using Silk.NET.OpenGL;
-using Voxel.Client.Gl;
-
 namespace Voxel.Client;
 
 /// <summary>
@@ -108,55 +105,5 @@ public readonly struct SkyState
         }
 
         return new SkyState(sunDir, zenith, horizon, sunDisc, light, dayAmount, moonVis, dirLightDir, dirLightColor);
-    }
-}
-
-/// <summary>Draws the sky gradient + sun/moon discs as a fullscreen background pass.</summary>
-public sealed class SkyRenderer : IDisposable
-{
-    private readonly GL _gl;
-    private readonly GlShader _shader;
-    private readonly uint _vao;
-
-    public SkyRenderer(GL gl, string shaderDir)
-    {
-        _gl = gl;
-        _shader = new GlShader(gl,
-            File.ReadAllText(Path.Combine(shaderDir, "post.vert")),
-            File.ReadAllText(Path.Combine(shaderDir, "sky.frag")));
-        // Attribute-less VAO for the gl_VertexID fullscreen triangle: core
-        // profile rejects draws with VAO 0 bound, and relying on whatever VAO
-        // the previous pass left bound breaks whenever a mesh upload resets
-        // the binding to 0 (black-sky flicker while chunks stream in).
-        _vao = gl.GenVertexArray();
-    }
-
-    public void Render(
-        in SkyState sky,
-        (float X, float Y, float Z) forward, (float X, float Y, float Z) right, (float X, float Y, float Z) up,
-        float tanHalfFov, float aspect)
-    {
-        _gl.Disable(EnableCap.DepthTest);
-        _gl.Disable(EnableCap.CullFace);
-        _gl.BindVertexArray(_vao);
-        _shader.Use();
-        _shader.SetVec3("uCamForward", forward.X, forward.Y, forward.Z);
-        _shader.SetVec3("uCamRight", right.X, right.Y, right.Z);
-        _shader.SetVec3("uCamUp", up.X, up.Y, up.Z);
-        _shader.SetFloat("uTanHalfFov", tanHalfFov);
-        _shader.SetFloat("uAspect", aspect);
-        _shader.SetVec3("uSkyZenith", sky.Zenith.R, sky.Zenith.G, sky.Zenith.B);
-        _shader.SetVec3("uSkyHorizon", sky.Horizon.R, sky.Horizon.G, sky.Horizon.B);
-        _shader.SetVec3("uSunDir", sky.SunDir.X, sky.SunDir.Y, sky.SunDir.Z);
-        _shader.SetVec3("uSunDiscColor", sky.SunDiscColor.R, sky.SunDiscColor.G, sky.SunDiscColor.B);
-        _shader.SetFloat("uMoonVisibility", sky.MoonVisibility);
-        _gl.DrawArrays(PrimitiveType.Triangles, 0, 3);
-        _gl.Enable(EnableCap.DepthTest);
-    }
-
-    public void Dispose()
-    {
-        _gl.DeleteVertexArray(_vao);
-        _shader.Dispose();
     }
 }

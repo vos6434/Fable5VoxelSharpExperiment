@@ -87,8 +87,11 @@ float skyVisibility(vec3 startWorld, vec3 normal) {
     vec3 p = startWorld - uOccupancyOrigin + normal * 0.01;
     ivec3 voxel = ivec3(floor(p));
     int size = int(uOccupancySize);
+    // Outside the volume footprint is not "open sky" — the toroid wraps only
+    // inside the cube. Treating xz OOB as open caused blue skylight/fog
+    // speckle on cave walls near the region edge (and when the volume recenters).
     if (voxel.x < 0 || voxel.z < 0 || voxel.x >= size || voxel.z >= size || voxel.y < 0) {
-        return 1.0;
+        return 0.0;
     }
     ivec3 wrapBase = ivec3(mod(uOccupancyOrigin, uOccupancySize) + 0.5);
     for (int i = 0; i < 96; i++) {
@@ -235,14 +238,18 @@ void main() {
     }
 
     // Skylight: sky ambient only where the column above is open.
+    float skyVis = 0.0;
     vec3 skyLight = vec3(0.0);
     if (dot(uAmbientSky, uAmbientSky) > 1e-6) {
-        skyLight = uAmbientSky * skyVisibility(vWorldPos, normal);
+        skyVis = skyVisibility(vWorldPos, normal);
+        skyLight = uAmbientSky * skyVis;
     }
 
     vec3 light = uAmbientFloor + skyLight + dirLight + blockLight(vWorldPos, normal);
     vec3 color = texel.rgb * vMeta.y * light;
 
-    float fogFactor = smoothstep(uFogNear, uFogFar, vFogDepth);
+    // Fog uses the horizon tint — only apply it where the fragment can see
+    // sky, otherwise distant cave walls fog to blue even in total darkness.
+    float fogFactor = smoothstep(uFogNear, uFogFar, vFogDepth) * skyVis;
     outColor = vec4(mix(color, uFogColor, fogFactor), texel.a);
 }

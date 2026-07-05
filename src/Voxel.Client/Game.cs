@@ -58,7 +58,6 @@ public sealed class Game
     private ColorMesh _cubeTriangles = null!;
     private uint _atlasTexture;
     private PostChain _postChain = null!;
-    private SkyRenderer _skyRenderer = null!;
     private OccupancyVolume _occupancy = null!;
     private LightVolume _lights = null!;
     private GpuTimer _timerSky = null!;
@@ -258,7 +257,6 @@ public sealed class Game
         _settings = Settings.Load(Path.Combine(_options.RepoRoot, "settings.json"));
         string shaderDir = Path.Combine(_options.RepoRoot, "shaders");
         _postChain = new PostChain(_gl, shaderDir, _window.FramebufferSize.X, _window.FramebufferSize.Y);
-        _skyRenderer = new SkyRenderer(_gl, shaderDir);
         int shadowRadius = Math.Clamp(_settings.ShadowRegionRadius, 4, 6);
         _occupancy = new OccupancyVolume(_gl, _data.Blocks.Opaque, shadowRadius);
         _lights = new LightVolume(_gl, _data.Blocks, shadowRadius);
@@ -507,15 +505,10 @@ public sealed class Game
         var right = Normalize(Cross(forward, (0f, 1f, 0f)));
         var up = Cross(right, forward);
 
-        // ---- Scene pass (offscreen) -----------------------------------------
+        // ---- Scene pass (offscreen): black clear + world only; sky is drawn
+        // in the composite pass so mesh cracks stay black instead of sky-blue.
         _postChain.BeginScene();
         _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
-
-        _timerSky.Begin();
-        var hellSky = new SkyState(sky.SunDir, zenith, horizon, sky.SunDiscColor, sky.LightColor, sky.DayAmount, sky.MoonVisibility,
-            sky.DirLightDir, sky.DirLightColor);
-        _skyRenderer.Render(in hellSky, forward, right, up, MathF.Tan(fovY / 2f), aspect);
-        _timerSky.End();
 
         _timerWorld.Begin();
         float[] viewProj = Mat4.Multiply(
@@ -609,8 +602,16 @@ public sealed class Game
         }
         _timerWorld.End();
 
-        // ---- Composite offscreen scene to the screen ------------------------
-        _postChain.Composite(size.X, size.Y);
+        var hellSky = new SkyState(sky.SunDir, zenith, horizon, sky.SunDiscColor, sky.LightColor, sky.DayAmount, sky.MoonVisibility,
+            sky.DirLightDir, sky.DirLightColor);
+        float tanHalfFov = MathF.Tan(fovY / 2f);
+        int surfaceY = _generator.SurfaceHeight((int)MathF.Floor(_camera.X), (int)MathF.Floor(_camera.Z));
+        float skyOpen = Math.Clamp((_camera.Y - (surfaceY - 4f)) / 10f, 0f, 1f) * (1f - hellT);
+
+        // ---- Composite: sky only on clear depth when the camera can see it ----
+        _timerSky.Begin();
+        _postChain.Composite(size.X, size.Y, in hellSky, forward, right, up, tanHalfFov, aspect, skyOpen);
+        _timerSky.End();
 
         // ---- UI overlay (drawn directly to the screen) ----------------------
         _timerUi.Begin();
