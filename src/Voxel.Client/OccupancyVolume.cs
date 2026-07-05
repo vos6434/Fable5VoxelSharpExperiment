@@ -4,10 +4,11 @@ using Voxel.Shared;
 namespace Voxel.Client;
 
 /// <summary>
-/// GPU occupancy of the world around the camera — one byte per voxel (255 =
-/// solid/opaque, 0 = passable) in an R8 3D texture. Shadow and light rays DDA
-/// through it (plan 02 M3+). Chunks upload a few per frame; edits re-upload
-/// just the touched chunk.
+/// GPU occupancy of the world around the camera — one byte per voxel in an
+/// R8 3D texture used by shadow rays (plan 02 M3+):
+///   0   = passable
+///   128 = emissive solid (blocks skylight; sun/moon and block-light rays pass through)
+///   255 = opaque solid
 ///
 /// Addressing is toroidal (per plan 02): world chunk c occupies texture slab
 /// c mod RegionChunks, so recentering on a chunk crossing keeps every chunk
@@ -29,7 +30,11 @@ public sealed class OccupancyVolume : IDisposable
     public int Size { get; }
 
     private readonly GL _gl;
+    private const byte OccEmissive = 128;
+    private const byte OccOpaque = 255;
+
     private readonly byte[] _opaque;
+    private readonly byte[] _emissive;
     private readonly uint _texture;
     private readonly byte[] _scratch = new byte[S * S * S];
     private readonly byte[] _zeroSlab = new byte[S * S * S];
@@ -41,10 +46,11 @@ public sealed class OccupancyVolume : IDisposable
     private (int X, int Y, int Z) _originChunk = (int.MinValue, 0, 0);
     private int _cursor;
 
-    public OccupancyVolume(GL gl, byte[] opaqueTable, int regionRadiusChunks)
+    public OccupancyVolume(GL gl, byte[] opaqueTable, byte[] emissiveMask, int regionRadiusChunks)
     {
         _gl = gl;
         _opaque = opaqueTable;
+        _emissive = emissiveMask;
         RegionRadiusChunks = regionRadiusChunks;
         RegionChunks = regionRadiusChunks * 2 + 1;
         Size = RegionChunks * S;
@@ -178,7 +184,7 @@ public sealed class OccupancyVolume : IDisposable
         for (int y = 0; y < S; y++)
             for (int z = 0; z < S; z++)
                 for (int x = 0; x < S; x++)
-                    _scratch[(z * S + y) * S + x] = _opaque[blocks[(y * S + z) * S + x]] != 0 ? (byte)255 : (byte)0;
+                    _scratch[(z * S + y) * S + x] = OccVoxel(blocks[(y * S + z) * S + x]);
 
         _gl.BindTexture(TextureTarget.Texture3D, _texture);
         fixed (byte* p = _scratch)
@@ -197,6 +203,12 @@ public sealed class OccupancyVolume : IDisposable
             _gl.TexSubImage3D(TextureTarget.Texture3D, 0, 0, 0, 0, (uint)Size, (uint)Size, (uint)Size,
                 PixelFormat.Red, PixelType.UnsignedByte, p);
         }
+    }
+
+    private byte OccVoxel(ushort id)
+    {
+        if (_opaque[id] == 0) return 0;
+        return _emissive[id] != 0 ? OccEmissive : OccOpaque;
     }
 
     public void Dispose() => _gl.DeleteTexture(_texture);

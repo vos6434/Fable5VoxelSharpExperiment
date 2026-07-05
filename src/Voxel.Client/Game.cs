@@ -19,6 +19,8 @@ public sealed record GameOptions
     public (float Yaw, float Pitch)? StartLook { get; init; }
     /// <summary>Verification hook: after streaming settles, place a glowstone column and break a block via the interaction code path.</summary>
     public bool DemoEdits { get; init; }
+    /// <summary>Verification hook: place a tall glowstone column at the camera's feet (cave pillar test).</summary>
+    public bool DemoPillar { get; init; }
     /// <summary>Verification hook: open the inventory + creative windows with a cursor stack.</summary>
     public bool DemoGui { get; init; }
     /// <summary>Verification hook: show the pause menu.</summary>
@@ -258,7 +260,7 @@ public sealed class Game
         string shaderDir = Path.Combine(_options.RepoRoot, "shaders");
         _postChain = new PostChain(_gl, shaderDir, _window.FramebufferSize.X, _window.FramebufferSize.Y);
         int shadowRadius = Math.Clamp(_settings.ShadowRegionRadius, 4, 6);
-        _occupancy = new OccupancyVolume(_gl, _data.Blocks.Opaque, shadowRadius);
+        _occupancy = new OccupancyVolume(_gl, _data.Blocks.Opaque, _data.EmissiveMask, shadowRadius);
         _lights = new LightVolume(_gl, _data.Blocks, shadowRadius);
         _timerSky = new GpuTimer(_gl, "sky");
         _timerWorld = new GpuTimer(_gl, "world");
@@ -470,6 +472,19 @@ public sealed class Game
             _world.SetBlock(bx + 2, surface, bz, 0);
             _connection.SendSetBlock(bx + 2, surface, bz, 0);
             Console.WriteLine($"[client] demo edits at ({bx}, {surface + 1}..{surface + 3}, {bz}) + break ({bx + 2}, {surface}, {bz})");
+        }
+        if (_options.DemoPillar && _frameCount == 240)
+        {
+            ushort glow = _data.Blocks.Resolve("glowstone");
+            int bx = (int)MathF.Floor(_camera.X);
+            int bz = (int)MathF.Floor(_camera.Z);
+            int by = (int)MathF.Floor(_camera.Y);
+            for (int i = 0; i < 12; i++)
+            {
+                _world.SetBlock(bx, by + i, bz, glow);
+                _connection.SendSetBlock(bx, by + i, bz, glow);
+            }
+            Console.WriteLine($"[client] demo pillar at ({bx}, {by}..{by + 11}, {bz})");
         }
     }
 

@@ -49,6 +49,13 @@ bool solidAt(ivec3 voxel, int size, ivec3 wrapBase) {
     return texelFetch(uOccupancy, (voxel + wrapBase) % size, 0).r > 0.5;
 }
 
+// Full opaque solids (255/255) cast sun/moon and block-light shadows.
+// Emissive solids (128/255) do not — otherwise a glowstone pillar occludes
+// its own light on the floor around its base and casts a sun shadow too.
+bool blocksBlockLight(ivec3 voxel, int size, ivec3 wrapBase) {
+    return texelFetch(uOccupancy, (voxel + wrapBase) % size, 0).r > 200.0 / 255.0;
+}
+
 // DDA (Amanatides & Woo) march toward the directional light; 1 = lit.
 float dirShadow(vec3 startWorld, vec3 normal) {
     vec3 dir = uDirDir;
@@ -69,7 +76,7 @@ float dirShadow(vec3 startWorld, vec3 normal) {
             voxel.x >= size || voxel.y >= size || voxel.z >= size) {
             return 1.0; // left the volume without hitting anything -> lit
         }
-        if (solidAt(voxel, size, wrapBase)) return 0.0;
+        if (blocksBlockLight(voxel, size, wrapBase)) return 0.0;
         if (tMax.x < tMax.y && tMax.x < tMax.z) {
             voxel.x += stp.x; tMax.x += tDelta.x;
         } else if (tMax.y < tMax.z) {
@@ -119,7 +126,7 @@ float lightRay(vec3 fromRel, vec3 lightRel, vec3 dir) {
             voxel.x >= size || voxel.y >= size || voxel.z >= size) {
             return 1.0;
         }
-        if (solidAt(voxel, size, wrapBase)) return 0.0;
+        if (blocksBlockLight(voxel, size, wrapBase)) return 0.0;
         if (tMax.x < tMax.y && tMax.x < tMax.z) {
             voxel.x += stp.x; tMax.x += tDelta.x;
         } else if (tMax.y < tMax.z) {
