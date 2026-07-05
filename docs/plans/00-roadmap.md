@@ -53,8 +53,27 @@ same discipline used for the original build and the port).
 - Everything stays **data-driven**: new items (glue, physics gun), light
   colors, map colors, models — all land in `/data` with schema docs updated.
 - Everything stays **server-authoritative**: physics, time, map state.
-- The wire protocol grows (new message types are listed per plan); the web
-  client is legacy — it will lose compatibility once entity messages ship,
-  which is accepted.
+- **The web version is dropped** (decision 2026-07-05): D:\Fable5Voxel is an
+  archive, no longer a verification tool or compatibility constraint. The
+  golden test data stays as a frozen regression pin; if shared math ever
+  changes deliberately, goldens are re-baselined from the C# implementation.
+- The wire protocol still carries a **version byte in Hello/Welcome**
+  (added in plan 01) — not for the web client, but so a stale published
+  native client fails with a clear "client outdated" message instead of
+  undefined behavior.
 - Every milestone ends runnable, with the screenshot/log verification
   workflow used throughout the port.
+
+## Deferred backlog (explicitly postponed 2026-07-05 — core tech first)
+
+- **Survival core** — player gravity/collision/walking, hold-to-mine with
+  the existing JSON hardness/tool/drop rules, item pickup.
+- **Sound system** — OpenAL, data-driven sound sets (block JSON `sounds`
+  keys are already in place), contraption impact audio.
+- **Worldgen v3** — trees, ores, cross-chunk structures.
+- **Multiplayer QoL** — chat, server config file (seed/port/day length),
+  join password.
+- **Powered contraption components** — bearings/motors/pistons (Create-mod
+  soul). Plan 03 keeps the door open: contraption architecture must allow
+  per-block behaviors and multi-body constraints (Bepu motors/hinges), even
+  though v1 ships single rigid bodies only.

@@ -16,21 +16,24 @@ and color driven by the same 3D biome system that shapes the world.
 
 ## Design
 
-### Rendering pipeline change (the enabler)
+### Rendering pipeline (inherited)
 
-- The scene currently renders straight to the default framebuffer. Step one
-  is an **offscreen HDR-ish pass**: scene → color + depth textures →
-  post-process chain → composite to screen. This is deliberately built as a
-  small generic `PostChain` (fog today; bloom/SSAO possible later).
+- The offscreen scene pass + `PostChain` skeleton + GPU timers are built in
+  **plan 02 milestone 0** (pulled forward from here); this plan only adds
+  passes to the existing chain.
 
 ### The fog pass
 
 - Half-res target. Per pixel: reconstruct the view ray, march from camera to
   the scene depth (max ~24 steps, exponential step distribution — near
   steps finer where shafts matter).
-- Per step accumulate `density(worldPos) * (ambient + sunColor * shadow)`,
-  where `shadow` samples the CSM from plan 02 — occluded segments stay dark
-  → **god rays** fall out naturally as the sun moves.
+- Per step accumulate `density(worldPos) * (ambient + sunColor * shadow)`.
+  **Shadow term = a DDA ray through plan 02's occupancy bitmap** (updated
+  after plan 02's rewrite — the fog march and the lighting share one world
+  structure): more accurate than shadow-map sampling, works underground and
+  near the hell boundary, and even picks up shafts from *block lights* for
+  march points inside lit clusters (budget-gated). If plan 02 ends up on the
+  CSM fallback tier, this term samples the CSM instead — both paths noted.
 - **Blue-noise jitter** per pixel de-bands the march; a depth-aware
   (bilateral) upsample composites the half-res result without halos around
   geometry edges.
@@ -62,17 +65,17 @@ and color driven by the same 3D biome system that shapes the world.
 
 ## Milestones
 
-1. **PostChain** — offscreen scene + trivial passthrough composite; zero
-   visual change, screenshot-diff verified; HUD reports pass timings.
-2. **Analytic fog in post** — current fog reproduced in the new pass
-   (deletes the in-shader fog uniforms); hell override behavior preserved.
-3. **Raymarch + shafts** — homogeneous fog with CSM sampling; timelapse
-   screenshots show shafts rotating with the sun through terrain gaps.
-4. **Quality pass** — blue-noise jitter, bilateral upsample, step tuning;
+1. **Analytic fog in post** — current fog reproduced as a `PostChain` pass
+   (the chain itself ships with plan 02 M0; this deletes the in-shader fog
+   uniforms); hell override behavior preserved.
+2. **Raymarch + shafts** — homogeneous fog with occupancy-DDA shadowing;
+   timelapse screenshots show shafts rotating with the sun through terrain
+   gaps.
+3. **Quality pass** — blue-noise jitter, bilateral upsample, step tuning;
    half-res artifacts eliminated in screenshot review.
-5. **Biome density field** — coarse-grid sampler + 3D texture; hell descent
+4. **Biome density field** — coarse-grid sampler + 3D texture; hell descent
    becomes the showcase (screenshot series surface → cave → hell).
-6. **Perf + fallback** — ≤ 1.5 ms at 1080p half-res on the dev GPU;
+5. **Perf + fallback** — ≤ 1.5 ms at 1080p half-res on the dev GPU;
    settings toggle wired.
 
 ## Verification
@@ -85,9 +88,9 @@ and color driven by the same 3D biome system that shapes the world.
 
 ## Risks & open questions
 
-- Shadow-map reuse means fog quality inherits shadow-map range limits —
-  shafts fade beyond cascade 2; acceptable (distant fog is extinction-
-  dominated anyway).
+- Shafts reach only as far as the occupancy region (~96 blocks) — beyond
+  that the march falls back to unshadowed density; acceptable (distant fog
+  is extinction-dominated anyway).
 - Temporal shimmer under motion with jittered marching — if visible, add a
   cheap temporal blend (previous-frame reprojection) as milestone 4.5.
 - Water: underwater volumetrics are a natural extension (blue absorption) —

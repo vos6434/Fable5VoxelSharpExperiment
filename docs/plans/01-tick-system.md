@@ -36,6 +36,12 @@ crop growth...) hangs off this one clock.
 
 ### Protocol
 
+- **Version handshake first:** `Hello` gains a `protocolVersion` field and
+  `Welcome` echoes the server's; mismatch → server sends a plain-text close
+  reason ("client outdated, get the new build") and drops the socket. This
+  is the first protocol change since the web version was dropped — it exists
+  so stale *published native* clients fail loudly, and it makes every later
+  protocol change in plans 02–07 safe to ship.
 - New message `TimeSync` (server→client): `i64 worldTick, f32 timescale,
   i32 dayLengthTicks`. Sent on join, on any timescale change, and every 100
   ticks as a drift guard.
@@ -51,12 +57,13 @@ crop growth...) hangs off this one clock.
 ## Data / schema changes
 
 - `meta` table: new key `worldTime` (backward compatible — absent key means 0).
-- Protocol: one new message type. Web client ignores unknown types today
-  (default case) — verify, since this is the first server→web message it
-  won't understand.
+- Protocol: version field in Hello/Welcome + one new message type. (The web
+  client is dropped and no longer a compatibility consideration.)
 
 ## Milestones
 
+0. **Protocol version handshake** — version byte both ways, clean rejection
+   of mismatched clients (tested with a deliberately wrong version).
 1. **Tick loop** — accumulator loop in the server, move-broadcast and
    heartbeat migrated onto it; TPS counter in the stats log.
 2. **World clock persistence** — `worldTime` survives restart (observable in

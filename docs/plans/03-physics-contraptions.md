@@ -87,10 +87,16 @@ and throws them. Server-authoritative, multiplayer-correct.
   extrapolate briefly by velocity if starved.
 - Contraptions render into the shadow pass (02) once both features exist.
 
-### Persistence
+### Persistence & world-format migrations
 
 - `entities` table: id, kind, blocks blob, transform, velocities, asleep
   flag. Saved on change-of-sleep-state + shutdown; loaded (asleep) on boot.
+- This is the first schema change since launch, so it ships with a small
+  **migration runner**: ordered `Migration` steps keyed off the existing
+  `formatVersion` meta value, applied transactionally on world open
+  (v1→v2 = create `entities`). Plans 04 (LOD cache) and 07 (block-state
+  bits) then add migrations instead of ad-hoc version checks — one
+  mechanism, built once, at the moment it's first needed.
 
 ## Milestones
 
@@ -103,7 +109,9 @@ and throws them. Server-authoritative, multiplayer-correct.
    over as one object. Blocks vanish from the grid correctly for all clients.
 4. **Physics gun** — grab/carry/scroll/throw with the servo constraint;
    two players fighting over one crate resolves cleanly (single holder).
-5. **Persistence** — contraptions survive restart, wake on interaction.
+5. **Persistence + migration runner** — formatVersion-keyed migrations
+   (v1→v2 creates `entities`); contraptions survive restart, wake on
+   interaction.
 6. **Caps & hardening** — 1,000-block cap UX, CCD for throws, contraption-
    vs-contraption stacking stress test (10× 100-block crates).
 7. **Disassemble** — snap-back-to-blocks flow.

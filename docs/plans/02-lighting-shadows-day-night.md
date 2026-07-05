@@ -107,12 +107,19 @@ Three intertwined systems:
 
 ## Milestones
 
+0. **Render pipeline groundwork** (pulled forward from plan 06) — offscreen
+   scene rendering (color + depth targets, composite pass = the `PostChain`
+   skeleton) and **GPU pass timers** shown in the HUD. Rationale: milestone
+   3's perf gate needs *measured* pass timings to be a real gate, and the
+   documented plan-B (half-res lighting + bilateral upsample) needs the
+   offscreen pipeline anyway. Plan 06 then inherits both for free.
 1. **Clock → sky** — sun position + sky gradient + sun/moon quads from world
    time; `tick rate 10` timelapse.
 2. **Occupancy infra** — bitmap region + per-chunk upload + edit updates;
    debug view (shader mode rendering occupancy directly).
-3. **Sun ray shadows** — two-level DDA; **PERF GATE:** ≥ 60 fps at current
-   view distance on the dev GPU, else pivot to fallback tier (CSM first).
+3. **Sun ray shadows** — two-level DDA; **PERF GATE** (measured via M0
+   timers): ≥ 60 fps at current view distance on the dev GPU, else pivot to
+   fallback tier (CSM first).
 4. **Emitters + clusters** — registry, cluster lists, unshadowed colored
    point lights (lightColor JSON live here).
 5. **Block-light shadow rays** — capped shadowed lights per cluster; the
