@@ -28,8 +28,9 @@ public sealed class GameServer
         public required Channel<byte[]> Outbox { get; init; }
         public double X, Y, Z;
         public float Yaw, Pitch;
-        /// <summary>Blocks this player has glue-marked (plan 03 M3); only their own thread touches it.</summary>
-        public readonly HashSet<(int X, int Y, int Z)> GlueMarks = new();
+        /// <summary>WorldEdit-style box selection corners for the next contraption (plan 03 M3).</summary>
+        public (int X, int Y, int Z)? GlueCorner1;
+        public (int X, int Y, int Z)? GlueCorner2;
     }
 
     private readonly WorldStore _store;
@@ -138,10 +139,23 @@ public sealed class GameServer
         return def.Collision == Collision.Solid && def.Hardness >= 0;
     }
 
-    private static bool FaceAdjacent((int X, int Y, int Z) p, HashSet<(int, int, int)> set) =>
-        set.Contains((p.X + 1, p.Y, p.Z)) || set.Contains((p.X - 1, p.Y, p.Z)) ||
-        set.Contains((p.X, p.Y + 1, p.Z)) || set.Contains((p.X, p.Y - 1, p.Z)) ||
-        set.Contains((p.X, p.Y, p.Z + 1)) || set.Contains((p.X, p.Y, p.Z - 1));
+    private void SyncGlueSelection(Client client) =>
+        client.Outbox.Writer.TryWrite(Protocol.EncodeGlueSelection(client.GlueCorner1, client.GlueCorner2));
+
+    private List<(int X, int Y, int Z)> CollectGlueBox((int X, int Y, int Z) c1, (int X, int Y, int Z) c2)
+    {
+        int minX = Math.Min(c1.X, c2.X), maxX = Math.Max(c1.X, c2.X);
+        int minY = Math.Min(c1.Y, c2.Y), maxY = Math.Max(c1.Y, c2.Y);
+        int minZ = Math.Min(c1.Z, c2.Z), maxZ = Math.Max(c1.Z, c2.Z);
+        var marks = new List<(int X, int Y, int Z)>();
+        for (int y = minY; y <= maxY; y++)
+        for (int z = minZ; z <= maxZ; z++)
+        for (int x = minX; x <= maxX; x++)
+        {
+            if (IsGlueable(GetWorldBlock(x, y, z))) marks.Add((x, y, z));
+        }
+        return marks;
+    }
 
     private void HandleUseItem(Client client, (Protocol.ItemAction Action, int X, int Y, int Z) use)
     {
@@ -149,25 +163,33 @@ public sealed class GameServer
         {
             case Protocol.ItemAction.GlueMark:
             {
-                var p = (use.X, use.Y, use.Z);
-                if (client.GlueMarks.Contains(p) || client.GlueMarks.Count >= MaxContraptionBlocks) break;
                 if (!IsGlueable(GetWorldBlock(use.X, use.Y, use.Z))) break;
-                // The set must stay one face-connected piece.
-                if (client.GlueMarks.Count > 0 && !FaceAdjacent(p, client.GlueMarks)) break;
-                client.GlueMarks.Add(p);
-                client.Outbox.Writer.TryWrite(Protocol.EncodeGlueMarks([.. client.GlueMarks]));
+                var p = (use.X, use.Y, use.Z);
+                if (client.GlueCorner1 is null)
+                    client.GlueCorner1 = p;
+                else if (client.GlueCorner2 is null)
+                    client.GlueCorner2 = p;
+                else
+                {
+                    client.GlueCorner1 = p;
+                    client.GlueCorner2 = null;
+                }
+                SyncGlueSelection(client);
                 break;
             }
             case Protocol.ItemAction.GlueClear:
-                client.GlueMarks.Clear();
-                client.Outbox.Writer.TryWrite(Protocol.EncodeGlueMarks([]));
+                client.GlueCorner1 = null;
+                client.GlueCorner2 = null;
+                SyncGlueSelection(client);
                 break;
             case Protocol.ItemAction.GlueActivate:
             {
-                if (client.GlueMarks.Count == 0) break;
-                var marks = client.GlueMarks.ToList();
-                client.GlueMarks.Clear();
-                client.Outbox.Writer.TryWrite(Protocol.EncodeGlueMarks([]));
+                if (client.GlueCorner1 is not { } a || client.GlueCorner2 is not { } b) break;
+                var marks = CollectGlueBox(a, b);
+                if (marks.Count is 0 or > MaxContraptionBlocks) break;
+                client.GlueCorner1 = null;
+                client.GlueCorner2 = null;
+                SyncGlueSelection(client);
                 _tickActions.Enqueue(() => ActivateContraption(marks));
                 break;
             }

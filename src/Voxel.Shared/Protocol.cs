@@ -18,7 +18,7 @@ public enum Msg : byte
     Move = 3,         // f64 x,y,z, f32 yaw, f32 pitch
     SetBlock = 4,     // i32 x,y,z, u16 blockId (0 = break)
     TimeControl = 5,  // i64 setTick (-1 = no change), f32 timescale (<0 = no change)
-    UseItem = 6,      // u8 action (0=glue mark, 1=glue activate, 2=glue clear), i32 x,y,z
+    UseItem = 6,      // u8 action (0=glue corner, 1=glue activate, 2=glue clear), i32 x,y,z
     // server → client
     Welcome = 10,     // JSON { playerId, seed, spawn, palette, protocolVersion }
     ChunkData = 11,   // i32 cx,cy,cz, u8 empty, [deflate-raw u16 LE blocks]
@@ -31,7 +31,7 @@ public enum Msg : byte
     EntitySpawn = 17,   // u32 id, u8 kind, u16 dimX,dimY,dimZ, f64 x,y,z, f32 qx,qy,qz,qw, f32 pivotX,Y,Z, [deflate-raw u16 blocks]
     EntityState = 18,   // u16 count, count x (u32 id, f32 x,y,z, f32 qx,qy,qz,qw, f32 vx,vy,vz)
     EntityDespawn = 19, // u32 id, u8 becameBlocks
-    GlueMarks = 20,     // u16 count, count x (i32 x,y,z) — the marking player's overlay
+    GlueMarks = 20,     // u16 count (0–2), count x (i32 x,y,z) — selection corners 1..2
 }
 
 public sealed class WelcomePayload
@@ -283,6 +283,25 @@ public static class Protocol
     // ---- UseItem / glue (plan 03 M3) ------------------------------------------
 
     public enum ItemAction : byte { GlueMark = 0, GlueActivate = 1, GlueClear = 2 }
+
+    /// <summary>Sync the marking player's box selection (0, 1, or 2 corners).</summary>
+    public static byte[] EncodeGlueSelection((int X, int Y, int Z)? corner1, (int X, int Y, int Z)? corner2)
+    {
+        if (corner1 is null) return EncodeGlueMarks([]);
+        if (corner2 is null) return EncodeGlueMarks([corner1.Value]);
+        return EncodeGlueMarks([corner1.Value, corner2.Value]);
+    }
+
+    public static ((int X, int Y, int Z)? Corner1, (int X, int Y, int Z)? Corner2) DecodeGlueSelection(ReadOnlySpan<byte> message)
+    {
+        var marks = DecodeGlueMarks(message);
+        return marks.Length switch
+        {
+            0 => (null, null),
+            1 => (marks[0], null),
+            _ => (marks[0], marks[1]),
+        };
+    }
 
     public static byte[] EncodeUseItem(ItemAction action, int x, int y, int z)
     {

@@ -24,7 +24,7 @@ public abstract record ServerEvent
         float PivotX, float PivotY, float PivotZ, ushort[] Blocks) : ServerEvent;
     public sealed record EntityStates(Protocol.EntityState[] States) : ServerEvent;
     public sealed record EntityDespawned(uint Id, bool BecameBlocks) : ServerEvent;
-    public sealed record GlueMarksUpdated((int X, int Y, int Z)[] Marks) : ServerEvent;
+    public sealed record GlueSelectionUpdated((int X, int Y, int Z)? Corner1, (int X, int Y, int Z)? Corner2) : ServerEvent;
     public sealed record Disconnected(string Reason) : ServerEvent;
 }
 
@@ -213,8 +213,11 @@ public sealed class Connection : IDisposable
                 break;
             }
             case Msg.GlueMarks:
-                Events.Enqueue(new ServerEvent.GlueMarksUpdated(Protocol.DecodeGlueMarks(message)));
+            {
+                var (c1, c2) = Protocol.DecodeGlueSelection(message);
+                Events.Enqueue(new ServerEvent.GlueSelectionUpdated(c1, c2));
                 break;
+            }
             default:
                 break;
         }

@@ -63,6 +63,20 @@ public class EntityProtocolTests
     }
 
     [Fact]
+    public void GlueSelection_round_trip()
+    {
+        byte[] none = Protocol.EncodeGlueSelection(null, null);
+        Assert.Equal(Msg.GlueMarks, Protocol.TypeOf(none));
+        Assert.Equal((null, null), Protocol.DecodeGlueSelection(none));
+
+        byte[] one = Protocol.EncodeGlueSelection((0, 0, 0), null);
+        Assert.Equal(((0, 0, 0), null), Protocol.DecodeGlueSelection(one));
+
+        byte[] two = Protocol.EncodeGlueSelection((0, 0, 0), (5, 10, -3));
+        Assert.Equal(((0, 0, 0), (5, 10, -3)), Protocol.DecodeGlueSelection(two));
+    }
+
+    [Fact]
     public void GlueMarks_round_trip()
     {
         (int, int, int)[] marks = [(0, 0, 0), (-1, 2, -3), (100000, -200000, 300000)];

@@ -69,7 +69,8 @@ public sealed class Game
     private readonly RemotePlayers _players = new();
     private readonly ClientClock _clock = new();
     private EntityRenderer _entities = null!;
-    private (int X, int Y, int Z)[] _glueMarks = [];
+    private (int X, int Y, int Z)? _glueCorner1;
+    private (int X, int Y, int Z)? _glueCorner2;
     private static readonly float[] IdentityMat = Mat4.Identity();
 
     private Settings _settings = null!;
@@ -140,8 +141,8 @@ public sealed class Game
             int uiButton = button == MouseButton.Right ? 2 : 0;
             if (_camera.Captured)
             {
-                // Glue in hand: RMB marks the aimed block, Shift+RMB activates
-                // the marked set into a contraption, LMB clears the marks.
+                // Glue in hand: RMB sets corner 1 then corner 2 (WorldEdit-style
+                // box), Shift+RMB activates, LMB clears the selection.
                 if (_inventory.SelectedStack()?.Id == "glue")
                 {
                     bool shift = _keyboard.IsKeyPressed(Key.ShiftLeft) || _keyboard.IsKeyPressed(Key.ShiftRight);
@@ -353,6 +354,14 @@ public sealed class Game
         return id != 0 && _data.Blocks.Get(id).Collision != Collision.Liquid;
     }
 
+    private void DrawGlueCornerMarker((int X, int Y, int Z) c, float r, float g, float b)
+    {
+        _colorShader.SetVec3("uOrigin", c.X - 0.002f, c.Y - 0.002f, c.Z - 0.002f);
+        _colorShader.SetVec3("uScale", 1.004f, 1.004f, 1.004f);
+        _colorShader.SetFloat4("uColor", r, g, b, 1f);
+        _cubeLines.Draw();
+    }
+
     private RaycastHit? Aim()
     {
         var (dx, dy, dz) = AimDirection();
@@ -413,9 +422,10 @@ public sealed class Game
             {
                 _clock.OnSync(sync.WorldTick, sync.Timescale, sync.DayLengthTicks);
             }
-            else if (evt is ServerEvent.GlueMarksUpdated glue)
+            else if (evt is ServerEvent.GlueSelectionUpdated glue)
             {
-                _glueMarks = glue.Marks;
+                _glueCorner1 = glue.Corner1;
+                _glueCorner2 = glue.Corner2;
             }
         }
 
@@ -651,13 +661,29 @@ public sealed class Game
             _cubeTriangles.Draw();
             draws++;
         }
-        // Glue marks: highlight the blocks staged for the next contraption.
-        foreach (var (mx, my, mz) in _glueMarks)
+        // Glue box selection: two corners + live preview wireframe.
+        if (_glueCorner1 is { } c1)
         {
-            _colorShader.SetVec3("uOrigin", mx - 0.003f, my - 0.003f, mz - 0.003f);
-            _colorShader.SetVec3("uScale", 1.006f, 1.006f, 1.006f);
-            _colorShader.SetFloat4("uColor", 1f, 0.85f, 0.2f, 1f);
-            _cubeLines.Draw();
+            var c2 = _glueCorner2 ?? (_target is RaycastHit t ? ((int X, int Y, int Z)?)(t.X, t.Y, t.Z) : null);
+            if (c2 is { } c2v)
+            {
+                int minX = Math.Min(c1.X, c2v.X), maxX = Math.Max(c1.X, c2v.X);
+                int minY = Math.Min(c1.Y, c2v.Y), maxY = Math.Max(c1.Y, c2v.Y);
+                int minZ = Math.Min(c1.Z, c2v.Z), maxZ = Math.Max(c1.Z, c2v.Z);
+                const float pad = 0.002f;
+                _colorShader.SetVec3("uOrigin", minX - pad, minY - pad, minZ - pad);
+                _colorShader.SetVec3("uScale", maxX - minX + 1 + pad * 2, maxY - minY + 1 + pad * 2, maxZ - minZ + 1 + pad * 2);
+                _colorShader.SetFloat4("uColor", 1f, 0.85f, 0.2f, 1f);
+                _cubeLines.Draw();
+                draws++;
+            }
+            DrawGlueCornerMarker(c1, 1f, 0.85f, 0.2f);
+            draws++;
+            if (_glueCorner2 is { } c2set)
+            {
+                DrawGlueCornerMarker(c2set, 0.35f, 0.85f, 1f);
+                draws++;
+            }
         }
         if (_target is RaycastHit target)
         {
