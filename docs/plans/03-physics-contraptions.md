@@ -117,6 +117,15 @@ and throws them. Server-authoritative, multiplayer-correct.
    players get cached spawn payloads. 59 tests.
 2. **Terrain collision** — the debug body lands on and rolls down real
    terrain; static-collider cache with edit invalidation.
+   **DONE (2026-07-05).** Lazy per-chunk voxel colliders: each tick,
+   chunks within 1 of an awake body get greedy-merged box statics (solid
+   `Collision.Solid` voxels → maximal boxes via +X/+Y/+Z runs), cached and
+   dropped when no awake body is near; block edits enqueue a chunk
+   invalidation onto the tick thread. Chunk blocks are fetched via a
+   world-lock-guarded clone so the tick thread reads stable data. The temp
+   M1 floor is gone; dynamic bodies get continuous collision detection so a
+   fast fall can't tunnel thin terrain. Verified: a box dropped from y=20
+   lands and rests on the grass surface (colliders build as it falls).
 3. **Glue → contraption** — mark/flood/validate/spawn; a glued tower falls
    over as one object. Blocks vanish from the grid correctly for all clients.
 4. **Physics gun** — grab/carry/scroll/throw with the servo constraint;

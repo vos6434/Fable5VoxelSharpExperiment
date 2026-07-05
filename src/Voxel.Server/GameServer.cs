@@ -50,6 +50,18 @@ public sealed class GameServer
         _clock = clock;
         _clock.OnTick += HandleTick;
         _clock.OnTimescaleChanged += BroadcastTimeSync;
+
+        // Physics terrain source: solid (collision) blocks collide; the chunk
+        // fetch clones under the world lock so the tick thread reads a stable
+        // copy while network SetBlocks may mutate the live chunk.
+        var collides = new byte[blocks.Count];
+        foreach (var def in blocks.Defs)
+        {
+            collides[def.NumericId] = (byte)(def.Collision == Collision.Solid ? 1 : 0);
+        }
+        _physics.SetTerrainSource(
+            (cx, cy, cz) => { lock (_worldLock) return (ushort[])_store.Load(cx, cy, cz).Blocks.Clone(); },
+            collides);
     }
 
     /// <summary>Runs on the clock thread — the server's simulation heartbeat.</summary>
@@ -266,6 +278,9 @@ public sealed class GameServer
                 if (edit.BlockId >= _blocks.Count) return; // unknown block
                 lock (_worldLock) _store.SetBlock(edit.X, edit.Y, edit.Z, edit.BlockId);
                 Broadcast(Protocol.EncodeBlockChange(Msg.BlockUpdate, edit.X, edit.Y, edit.Z, edit.BlockId));
+                // Rebuild that chunk's physics colliders on the tick thread.
+                int ecx = Coords.WorldToChunk(edit.X), ecy = Coords.WorldToChunk(edit.Y), ecz = Coords.WorldToChunk(edit.Z);
+                _tickActions.Enqueue(() => _physics.InvalidateChunk(ecx, ecy, ecz));
                 break;
             }
             case Msg.TimeControl:

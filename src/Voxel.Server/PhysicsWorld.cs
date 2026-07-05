@@ -31,10 +31,20 @@ public sealed class PhysicsWorld : IDisposable
         public required ushort[] Blocks { get; init; }
     }
 
+    private const int S = Constants.ChunkSize;
+    private const int ColliderChunkRadius = 1; // chunks around each awake body to collide
+
     private readonly BufferPool _pool = new();
     private readonly Simulation _sim;
     private readonly Dictionary<uint, Entity> _entities = new();
     private uint _nextId = 1;
+
+    // Lazy voxel-terrain colliders (M2): built for chunks near awake bodies,
+    // cached, invalidated on edit, removed when no awake body is near.
+    private Func<int, int, int, ushort[]?>? _getChunk;
+    private byte[] _collides = [];
+    private readonly Dictionary<(int, int, int), List<(StaticHandle Static, TypedIndex Shape)>> _chunkColliders = new();
+    private readonly HashSet<(int, int, int)> _neededScratch = new();
 
     public PhysicsWorld()
     {
@@ -43,12 +53,19 @@ public sealed class PhysicsWorld : IDisposable
             new NarrowPhaseCallbacks(),
             new PoseIntegratorCallbacks(new Vector3(0, -20f, 0)),
             new SolveDescription(velocityIterationCount: 6, substepCount: 1));
+    }
 
-        // M1 test floor: a wide, thin static slab held a few blocks *above*
-        // spawn terrain, so a dropped body rests visibly in the air (terrain
-        // has no colliders until M2). M2 replaces this with voxel colliders.
-        var floorShape = _sim.Shapes.Add(new Box(512, 1, 512));
-        _sim.Statics.Add(new StaticDescription(new Vector3(0, WorldGen.SeaLevel + 12f, 0), floorShape));
+    /// <summary>Wires the terrain source: a thread-safe chunk-blocks fetch + the "is solid" table.</summary>
+    public void SetTerrainSource(Func<int, int, int, ushort[]?> getChunk, byte[] collidesTable)
+    {
+        _getChunk = getChunk;
+        _collides = collidesTable;
+    }
+
+    /// <summary>Drop a chunk's colliders (rebuilt next time a body needs them).</summary>
+    public void InvalidateChunk(int cx, int cy, int cz)
+    {
+        if (_chunkColliders.Remove((cx, cy, cz), out var list)) RemoveColliders(list);
     }
 
     public IReadOnlyDictionary<uint, Entity> Entities => _entities;
@@ -63,7 +80,8 @@ public sealed class PhysicsWorld : IDisposable
         var body = _sim.Bodies.Add(BodyDescription.CreateDynamic(
             new RigidPose(position),
             inertia,
-            new CollidableDescription(shapeIndex, 0.1f),
+            // Continuous collision so a fast fall/throw can't tunnel thin terrain.
+            new CollidableDescription(shapeIndex, 0.1f, ContinuousDetection.Continuous(1e-3f, 1e-3f)),
             new BodyActivityDescription(0.01f)));
 
         var entity = new Entity
@@ -84,7 +102,106 @@ public sealed class PhysicsWorld : IDisposable
     }
 
     /// <summary>Advances the simulation by one tick's worth of time.</summary>
-    public void Step(float dt) => _sim.Timestep(dt);
+    public void Step(float dt)
+    {
+        UpdateTerrainColliders();
+        _sim.Timestep(dt);
+    }
+
+    /// <summary>Ensures chunks near awake bodies have colliders; drops the rest.</summary>
+    private void UpdateTerrainColliders()
+    {
+        if (_getChunk is null) return;
+
+        _neededScratch.Clear();
+        foreach (var e in _entities.Values)
+        {
+            var body = _sim.Bodies[e.Body];
+            if (!body.Awake) continue;
+            var p = body.Pose.Position;
+            int bcx = Coords.WorldToChunk((int)MathF.Floor(p.X));
+            int bcy = Coords.WorldToChunk((int)MathF.Floor(p.Y));
+            int bcz = Coords.WorldToChunk((int)MathF.Floor(p.Z));
+            for (int dx = -ColliderChunkRadius; dx <= ColliderChunkRadius; dx++)
+            for (int dy = -ColliderChunkRadius; dy <= ColliderChunkRadius; dy++)
+            for (int dz = -ColliderChunkRadius; dz <= ColliderChunkRadius; dz++)
+                _neededScratch.Add((bcx + dx, bcy + dy, bcz + dz));
+        }
+
+        // Add missing.
+        foreach (var key in _neededScratch)
+        {
+            if (!_chunkColliders.ContainsKey(key))
+            {
+                _chunkColliders[key] = BuildChunkColliders(key.Item1, key.Item2, key.Item3);
+            }
+        }
+        // Remove no-longer-needed (collect first — can't mutate while iterating).
+        List<(int, int, int)>? drop = null;
+        foreach (var key in _chunkColliders.Keys)
+        {
+            if (!_neededScratch.Contains(key)) (drop ??= []).Add(key);
+        }
+        if (drop is not null)
+        {
+            foreach (var key in drop)
+            {
+                RemoveColliders(_chunkColliders[key]);
+                _chunkColliders.Remove(key);
+            }
+        }
+    }
+
+    /// <summary>Greedy-merges a chunk's solid voxels into box statics.</summary>
+    private List<(StaticHandle, TypedIndex)> BuildChunkColliders(int cx, int cy, int cz)
+    {
+        var result = new List<(StaticHandle, TypedIndex)>();
+        ushort[]? blocks = _getChunk!(cx, cy, cz);
+        if (blocks is null) return result;
+
+        var consumed = new bool[Constants.ChunkVolume];
+        bool Solid(int x, int y, int z) =>
+            !consumed[ChunkData.Index(x, y, z)] && _collides[blocks[ChunkData.Index(x, y, z)]] != 0;
+
+        int ox = cx * S, oy = cy * S, oz = cz * S;
+        for (int y = 0; y < S; y++)
+        for (int z = 0; z < S; z++)
+        for (int x = 0; x < S; x++)
+        {
+            if (!Solid(x, y, z)) continue;
+
+            // Extend a box: +X run, then +Y (rows), then +Z (slabs).
+            int w = 1;
+            while (x + w < S && Solid(x + w, y, z)) w++;
+            int h = 1;
+            bool RowSolid(int yy) { for (int i = 0; i < w; i++) if (!Solid(x + i, yy, z)) return false; return true; }
+            while (y + h < S && RowSolid(y + h)) h++;
+            int d = 1;
+            bool SlabSolid(int zz) { for (int j = 0; j < h; j++) if (!RowSolid2(x, y + j, zz, w)) return false; return true; }
+            bool RowSolid2(int xx, int yy, int zz, int ww) { for (int i = 0; i < ww; i++) if (!Solid(xx + i, yy, zz)) return false; return true; }
+            while (z + d < S && SlabSolid(z + d)) d++;
+
+            for (int j = 0; j < h; j++)
+            for (int k = 0; k < d; k++)
+            for (int i = 0; i < w; i++)
+                consumed[ChunkData.Index(x + i, y + j, z + k)] = true;
+
+            var shape = _sim.Shapes.Add(new Box(w, h, d));
+            var handle = _sim.Statics.Add(new StaticDescription(
+                new Vector3(ox + x + w / 2f, oy + y + h / 2f, oz + z + d / 2f), shape));
+            result.Add((handle, shape));
+        }
+        return result;
+    }
+
+    private void RemoveColliders(List<(StaticHandle Static, TypedIndex Shape)> list)
+    {
+        foreach (var (s, shape) in list)
+        {
+            _sim.Statics.Remove(s);
+            _sim.Shapes.Remove(shape);
+        }
+    }
 
     /// <summary>Current pose + velocity of an entity (for EntityState streaming).</summary>
     public (Vector3 Pos, Quaternion Rot, Vector3 Vel) GetState(Entity e)
