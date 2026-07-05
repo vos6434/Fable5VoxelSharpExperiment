@@ -6,6 +6,10 @@ using Voxel.Shared;
 
 namespace Voxel.Client;
 
+/// <summary>Raised when the client cannot reach or handshake with the server; caught at startup for a clean message.</summary>
+public sealed class ClientConnectException(string message, Exception? inner = null)
+    : Exception(message, inner);
+
 /// <summary>One decoded server message, queued for the main thread.</summary>
 public abstract record ServerEvent
 {
@@ -52,26 +56,34 @@ public sealed class Connection : IDisposable
     public static async Task<Connection> ConnectAsync(Uri server, string playerName, TimeSpan timeout)
     {
         var ws = new ClientWebSocket();
-        using var connectCts = new CancellationTokenSource(timeout);
-        await ws.ConnectAsync(server, connectCts.Token);
-        await ws.SendAsync(
-            Protocol.EncodeJson(Msg.Hello, new HelloPayload { Name = playerName, ProtocolVersion = Protocol.Version }),
-            WebSocketMessageType.Binary, endOfMessage: true, connectCts.Token);
+        try
+        {
+            using var connectCts = new CancellationTokenSource(timeout);
+            await ws.ConnectAsync(server, connectCts.Token);
+            await ws.SendAsync(
+                Protocol.EncodeJson(Msg.Hello, new HelloPayload { Name = playerName, ProtocolVersion = Protocol.Version }),
+                WebSocketMessageType.Binary, endOfMessage: true, connectCts.Token);
 
-        byte[]? first = await ReceiveMessage(ws, connectCts.Token);
-        if (first is null)
-        {
-            // Version-mismatch rejections arrive as a close reason.
-            string reason = string.IsNullOrEmpty(ws.CloseStatusDescription)
-                ? "server closed during handshake"
-                : ws.CloseStatusDescription;
-            throw new InvalidOperationException(reason);
+            byte[]? first = await ReceiveMessage(ws, connectCts.Token);
+            if (first is null)
+            {
+                // Version-mismatch rejections arrive as a close reason.
+                string reason = string.IsNullOrEmpty(ws.CloseStatusDescription)
+                    ? "server closed during handshake"
+                    : ws.CloseStatusDescription;
+                throw new ClientConnectException(reason);
+            }
+            if (Protocol.TypeOf(first) != Msg.Welcome)
+            {
+                throw new ClientConnectException("protocol error: expected Welcome");
+            }
+            return new Connection(ws, Protocol.DecodeJson<WelcomePayload>(first));
         }
-        if (Protocol.TypeOf(first) != Msg.Welcome)
+        catch (Exception ex) when (ex is not ClientConnectException)
         {
-            throw new InvalidOperationException("protocol error: expected Welcome");
+            // Refused connection, timeout, DNS failure, etc. -> one clean type.
+            throw new ClientConnectException(ex.Message, ex);
         }
-        return new Connection(ws, Protocol.DecodeJson<WelcomePayload>(first));
     }
 
     public void RequestChunks(IReadOnlyList<(int, int, int)> coords) =>

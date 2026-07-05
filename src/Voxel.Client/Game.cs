@@ -206,7 +206,7 @@ public sealed class Game
         var localPalette = _data.Blocks.Defs.Select(d => d.StringId).ToArray();
         if (!localPalette.SequenceEqual(_connection.Palette))
         {
-            throw new InvalidOperationException("client/server block palette mismatch - restart both after changing /data");
+            throw new ClientConnectException("client/server block palette mismatch - restart both after changing /data");
         }
         Console.WriteLine($"[client] online as {_playerName} (#{_connection.PlayerId}) on {_options.Server}");
 

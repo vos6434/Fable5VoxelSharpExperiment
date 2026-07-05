@@ -53,16 +53,32 @@ string FindRepoRoot()
     throw new InvalidOperationException("repo root with /data and /shaders not found");
 }
 
-new Game(new GameOptions
+try
 {
-    RepoRoot = FindRepoRoot(),
-    Server = server,
-    ScreenshotPath = screenshotPath,
-    ScreenshotAfterFrames = screenshotFrames,
-    StartPosition = startPos,
-    StartLook = startLook,
-    DemoEdits = demoEdits,
-    DemoGui = demoGui,
-    DemoPause = demoPause,
-    ForceTimeTicks = forceTime,
-}).Run();
+    new Game(new GameOptions
+    {
+        RepoRoot = FindRepoRoot(),
+        Server = server,
+        ScreenshotPath = screenshotPath,
+        ScreenshotAfterFrames = screenshotFrames,
+        StartPosition = startPos,
+        StartLook = startLook,
+        DemoEdits = demoEdits,
+        DemoGui = demoGui,
+        DemoPause = demoPause,
+        ForceTimeTicks = forceTime,
+    }).Run();
+}
+catch (ClientConnectException ex)
+{
+    // The game server is unreachable or rejected us. Fail with a clear,
+    // actionable message instead of an unhandled-exception stack dump.
+    Console.Error.WriteLine();
+    Console.Error.WriteLine($"  Could not connect to the game server at {server}.");
+    Console.Error.WriteLine($"  Reason: {ex.Message}");
+    Console.Error.WriteLine();
+    Console.Error.WriteLine("  Start the server first, then launch the client:");
+    Console.Error.WriteLine("    dotnet run --project src/Voxel.Server");
+    Console.Error.WriteLine("  Or point the client at another host:  --server ws://host:8081");
+    Environment.Exit(1);
+}
