@@ -1,13 +1,33 @@
+using System.Globalization;
 using Voxel.Client;
+using Voxel.Shared;
 
-// --screenshot <path> [--frames N]: render N frames, save a PNG, exit.
-// Used for automated verification of the native renderer.
+// Flags:
+//   --server ws://host:port     game server (default ws://localhost:8081)
+//   --screenshot <path>         save a PNG after --frames frames, then exit
+//   --frames N                  frames before the screenshot (default 90)
+//   --pos x y z                 start position override (verification teleports)
+//   --look yaw pitch            start look angles (radians)
 string? screenshotPath = null;
 int screenshotFrames = 90;
+Uri server = new($"ws://localhost:{Protocol.Port}");
+(double, double, double)? startPos = null;
+(float, float)? startLook = null;
+
+double D(string s) => double.Parse(s, CultureInfo.InvariantCulture);
+float F(string s) => float.Parse(s, CultureInfo.InvariantCulture);
+
 for (int i = 0; i < args.Length; i++)
 {
-    if (args[i] == "--screenshot" && i + 1 < args.Length) screenshotPath = args[++i];
-    else if (args[i] == "--frames" && i + 1 < args.Length) screenshotFrames = int.Parse(args[++i]);
+    switch (args[i])
+    {
+        case "--server": server = new Uri(args[++i]); break;
+        case "--screenshot": screenshotPath = args[++i]; break;
+        case "--frames": screenshotFrames = int.Parse(args[++i]); break;
+        case "--pos": startPos = (D(args[++i]), D(args[++i]), D(args[++i])); break;
+        case "--look": startLook = (F(args[++i]), F(args[++i])); break;
+        default: throw new ArgumentException($"unknown argument {args[i]}");
+    }
 }
 
 string FindRepoRoot()
@@ -25,4 +45,12 @@ string FindRepoRoot()
     throw new InvalidOperationException("repo root with /data and /shaders not found");
 }
 
-new Game(FindRepoRoot(), screenshotPath, screenshotFrames).Run();
+new Game(new GameOptions
+{
+    RepoRoot = FindRepoRoot(),
+    Server = server,
+    ScreenshotPath = screenshotPath,
+    ScreenshotAfterFrames = screenshotFrames,
+    StartPosition = startPos,
+    StartLook = startLook,
+}).Run();
