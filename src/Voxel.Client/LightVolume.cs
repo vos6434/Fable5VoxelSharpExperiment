@@ -210,6 +210,18 @@ public sealed class LightVolume : IDisposable
     {
         const int S = Constants.ChunkSize;
         List<Emitter>? found = null;
+
+        // Bulk aggregation cells (4^3 blocks, 64 per chunk): contiguous
+        // glowing fields (lava lakes) merge into one virtual light per cell.
+        // This keeps hell's emitter count tiny AND keeps the per-cluster
+        // top-8 selection stable — per-block lava lights used to crowd out
+        // nearby placed lights (glowstone) in some clusters but not others,
+        // which showed up as grid-aligned lighting/shadow cutoffs.
+        Span<float> cells = stackalloc float[64 * 7]; // sumX,sumY,sumZ,sumR,sumG,sumB,count
+        Span<byte> cellIntensity = stackalloc byte[64];
+        cells.Clear();
+        cellIntensity.Clear();
+
         for (int i = 0; i < blocks.Length; i++)
         {
             ushort id = blocks[i];
@@ -227,26 +239,44 @@ public sealed class LightVolume : IDisposable
                 _opaque[blocks[i + S]] == 0 || _opaque[blocks[i - S]] == 0;
             if (!exposed) continue;
 
-            // Bulk thinning (hell lava oceans): a block with 3+ same-id
-            // emitting neighbors is part of a contiguous glowing field; keep
-            // only 1 in 4 (world-parity, so it's stable across rescans).
-            // Isolated emitters (torches, single glowstone) are never thinned.
-            int wx = cx * S + x, wy = cy * S + y, wz = cz * S + z;
-            if ((wx & 1) != 0 || (wz & 1) != 0)
+            // 3+ same-id emitting neighbors = part of a bulk field -> aggregate.
+            // Isolated emitters (torches, single glowstone) stay individual.
+            int same = 0;
+            if (x < S - 1 && blocks[i + 1] == id) same++;
+            if (x > 0 && blocks[i - 1] == id) same++;
+            if (y < S - 1 && blocks[i + S * S] == id) same++;
+            if (y > 0 && blocks[i - S * S] == id) same++;
+            if (z < S - 1 && blocks[i + S] == id) same++;
+            if (z > 0 && blocks[i - S] == id) same++;
+            if (same >= 3)
             {
-                int same = 0;
-                if (x < S - 1 && blocks[i + 1] == id) same++;
-                if (x > 0 && blocks[i - 1] == id) same++;
-                if (y < S - 1 && blocks[i + S * S] == id) same++;
-                if (y > 0 && blocks[i - S * S] == id) same++;
-                if (z < S - 1 && blocks[i + S] == id) same++;
-                if (z > 0 && blocks[i - S] == id) same++;
-                if (same >= 3) continue;
+                int ci = ((y >> 2) * 4 + (z >> 2)) * 4 + (x >> 2);
+                int b = ci * 7;
+                cells[b + 0] += x; cells[b + 1] += y; cells[b + 2] += z;
+                cells[b + 3] += _colR[id]; cells[b + 4] += _colG[id]; cells[b + 5] += _colB[id];
+                cells[b + 6] += 1;
+                if (_emission[id] > cellIntensity[ci]) cellIntensity[ci] = _emission[id];
             }
+            else
+            {
+                (found ??= new List<Emitter>()).Add(new Emitter(
+                    cx * S + x + 0.5f, cy * S + y + 0.5f, cz * S + z + 0.5f,
+                    _colR[id], _colG[id], _colB[id], _emission[id]));
+            }
+        }
 
+        // Emit one virtual light per non-empty cell at the members' centroid.
+        for (int ci = 0; ci < 64; ci++)
+        {
+            int b = ci * 7;
+            float n = cells[b + 6];
+            if (n <= 0) continue;
             (found ??= new List<Emitter>()).Add(new Emitter(
-                wx + 0.5f, wy + 0.5f, wz + 0.5f,
-                _colR[id], _colG[id], _colB[id], _emission[id]));
+                cx * S + cells[b + 0] / n + 0.5f,
+                cy * S + cells[b + 1] / n + 0.5f,
+                cz * S + cells[b + 2] / n + 0.5f,
+                cells[b + 3] / n, cells[b + 4] / n, cells[b + 5] / n,
+                cellIntensity[ci]));
         }
         return found;
     }
@@ -283,7 +313,11 @@ public sealed class LightVolume : IDisposable
                         float mz = (cz + 0.5f) * ClusterBlocks - rz;
                         float dist = MathF.Sqrt(mx * mx + my * my + mz * mz);
                         if (dist > radius + clusterReach) continue;
-                        Insert((cz * _clusters + cy) * _clusters + cx, e, e.Intensity / (1f + dist));
+                        // Rank by nearest-possible distance to the cluster, so
+                        // adjacent clusters agree on which lights matter (less
+                        // selection popping across cluster boundaries).
+                        float key = e.Intensity / (1f + Math.Max(0f, dist - clusterReach));
+                        Insert((cz * _clusters + cy) * _clusters + cx, e, key);
                     }
         }
 

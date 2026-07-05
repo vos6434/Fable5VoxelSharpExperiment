@@ -172,6 +172,21 @@ Three intertwined systems:
    cluster + a 1.5 soft ceiling on total block light in the shader, so
    emitter-dense areas read "saturated warm" instead of white. Hell at a
    lava field: 42 fps + white-out before, 166 fps and stable after.
+   **FIXED (2026-07-05, cluster-grid artifacts):** near lava fields the
+   per-cluster top-8 still popped between adjacent clusters (hundreds of
+   candidates ranked slightly differently), showing grid-aligned shadow
+   cutoffs — and a placed glowstone could lose its top-8 slot to lava in
+   *some* clusters, lighting only part of a room. Fixes: (1) parity thinning
+   replaced with *aggregation* — bulk emitters (≥ 3 same-id emitting
+   neighbors) merge into one virtual light per 4^3 cell at their centroid, so
+   a lava lake is a handful of stable lights instead of hundreds of
+   competing ones; (2) cluster ranking now uses nearest-possible distance
+   (dist − cluster reach), so neighboring clusters agree on which lights
+   matter; (3) the direction-less overflow term is sampled trilinearly
+   across the 8 surrounding clusters instead of stepping per cluster; (4) a
+   grazing-angle fade (smoothstep on N·L) removes hard-shadow sparkle where
+   light skims bumpy hell ceilings; (5) block light fades out over the last
+   12 blocks of the region instead of cutting to black at the boundary.
 5. **Block-light shadow rays** — capped shadowed lights per cluster; the
    money shot: a pillar between a torch and a wall casts a moving shadow
    when the torch is re-placed.

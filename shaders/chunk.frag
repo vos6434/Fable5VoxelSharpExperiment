@@ -128,6 +128,23 @@ float lightRay(vec3 fromRel, vec3 lightRel, vec3 dir) {
     return 1.0;
 }
 
+// Overflow term (lights past the per-cluster cap) sampled trilinearly across
+// the 8 surrounding clusters — a nearest-cluster fetch steps visibly at the
+// 8-block grid in emitter-dense areas (hell).
+vec3 overflowLight(vec3 rel) {
+    vec3 pc = rel / 8.0 - 0.5;
+    ivec3 base = ivec3(floor(pc));
+    vec3 f = pc - vec3(base);
+    vec3 sum = vec3(0.0);
+    for (int i = 0; i < 8; i++) {
+        ivec3 o = ivec3(i & 1, (i >> 1) & 1, i >> 2);
+        ivec3 c = clamp(base + o, ivec3(0), ivec3(uLightClusters - 1));
+        vec3 w = mix(1.0 - f, f, vec3(o));
+        sum += texelFetch(uLights, ivec3(c.x, c.y, c.z * 9 + 8), 0).rgb * (w.x * w.y * w.z);
+    }
+    return sum;
+}
+
 // Sum of colored block lights hitting this fragment (clustered, plan 02 M4/M5).
 vec3 blockLight(vec3 worldPos, vec3 normal) {
     // Cluster addressing is relative to the lights' build origin; shadow rays
@@ -139,8 +156,7 @@ vec3 blockLight(vec3 worldPos, vec3 normal) {
         return vec3(0.0);
     }
 
-    // Overflow: lights past the per-cluster cap, unshadowed and direction-less.
-    vec3 total = texelFetch(uLights, ivec3(cluster.x, cluster.y, cluster.z * 9 + 8), 0).rgb;
+    vec3 total = overflowLight(rel);
 
     vec3 occRel = worldPos - uOccupancyOrigin + normal * 0.01;
     for (int s = 0; s < 8; s++) {
@@ -161,6 +177,10 @@ vec3 blockLight(vec3 worldPos, vec3 normal) {
         vec3 ldir = toLight / max(dist, 1e-4);
         float ndotl = dot(normal, ldir);
         if (ndotl <= 0.0) continue;
+        // Grazing fade: hard voxel shadows sparkle when the light skims a
+        // bumpy surface (hell ceilings); fade those contributions out.
+        float grazing = smoothstep(0.03, 0.22, ndotl);
+        if (grazing <= 0.0) continue;
 
         float vis = 1.0;
         if (s < uShadowedLightCap) {
@@ -168,11 +188,17 @@ vec3 blockLight(vec3 worldPos, vec3 normal) {
             vis = lightRay(occRel, lightOccRel, ldir);
         }
         if (vis <= 0.0) continue;
-        total += color * ((1.0 - dist / intensity) * (intensity / 15.0) * ndotl * vis);
+        total += color * ((1.0 - dist / intensity) * (intensity / 15.0) * ndotl * grazing * vis);
     }
 
-    // Soft ceiling (hue-preserving): dozens of overlapping lava lights
-    // saturate instead of blowing out to white.
+    // Fade the whole term out near the region boundary instead of cutting to
+    // black at the last cluster.
+    float edge = min(min(rel.x, rel.y), rel.z);
+    edge = min(edge, uOccupancySize - max(max(rel.x, rel.y), rel.z));
+    total *= smoothstep(0.0, 12.0, edge);
+
+    // Soft ceiling (hue-preserving): overlapping lava lights saturate
+    // instead of blowing out to white.
     float peak = max(total.r, max(total.g, total.b));
     if (peak > 1.5) total *= 1.5 / peak;
     return total;
