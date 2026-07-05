@@ -16,6 +16,7 @@ Uri server = new($"ws://localhost:{Protocol.Port}");
 bool demoEdits = false;
 bool demoGui = false;
 bool demoPause = false;
+long? forceTime = null;
 
 double D(string s) => double.Parse(s, CultureInfo.InvariantCulture);
 float F(string s) => float.Parse(s, CultureInfo.InvariantCulture);
@@ -32,6 +33,7 @@ for (int i = 0; i < args.Length; i++)
         case "--demo-edits": demoEdits = true; break;
         case "--demo-gui": demoGui = true; break;
         case "--demo-pause": demoPause = true; break;
+        case "--time": forceTime = long.Parse(args[++i]); break;
         default: throw new ArgumentException($"unknown argument {args[i]}");
     }
 }
@@ -62,4 +64,5 @@ new Game(new GameOptions
     DemoEdits = demoEdits,
     DemoGui = demoGui,
     DemoPause = demoPause,
+    ForceTimeTicks = forceTime,
 }).Run();

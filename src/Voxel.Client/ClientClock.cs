@@ -16,6 +16,8 @@ public sealed class ClientClock
     private readonly Func<double> _now; // monotonic seconds
 
     private bool _synced;
+    private bool _forced;       // verification: time pinned, ignores server sync
+    private long _forcedTick;
     private long _anchorTick;
     private double _anchorTime;
     private float _timescale = 1f;
@@ -31,8 +33,19 @@ public sealed class ClientClock
         _now = now ?? (() => System.Diagnostics.Stopwatch.GetTimestamp() / (double)System.Diagnostics.Stopwatch.Frequency);
     }
 
+    /// <summary>Pins the clock to a fixed tick (verification screenshots); ignores server sync.</summary>
+    public void Force(long tick, int dayLengthTicks)
+    {
+        _forced = true;
+        _forcedTick = tick;
+        DayLengthTicks = dayLengthTicks;
+        _timescale = 0f;
+        _synced = true;
+    }
+
     public void OnSync(long worldTick, float timescale, int dayLengthTicks)
     {
+        if (_forced) { DayLengthTicks = dayLengthTicks; return; }
         double displayedBefore = _synced ? WorldTicks : worldTick;
         _timescale = timescale;
         DayLengthTicks = dayLengthTicks;
@@ -50,6 +63,7 @@ public sealed class ClientClock
     {
         get
         {
+            if (_forced) return _forcedTick;
             if (!_synced) return 0;
             double now = _now();
             double raw = _anchorTick + (now - _anchorTime) * Constants.TicksPerSecond * _timescale;

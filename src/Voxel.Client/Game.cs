@@ -23,6 +23,8 @@ public sealed record GameOptions
     public bool DemoGui { get; init; }
     /// <summary>Verification hook: show the pause menu.</summary>
     public bool DemoPause { get; init; }
+    /// <summary>Verification hook: pin the day/night clock to a fixed tick.</summary>
+    public long? ForceTimeTicks { get; init; }
 }
 
 /// <summary>
@@ -53,6 +55,11 @@ public sealed class Game
     private ColorMesh _cubeLines = null!;
     private ColorMesh _cubeTriangles = null!;
     private uint _atlasTexture;
+    private PostChain _postChain = null!;
+    private SkyRenderer _skyRenderer = null!;
+    private GpuTimer _timerSky = null!;
+    private GpuTimer _timerWorld = null!;
+    private GpuTimer _timerUi = null!;
     private readonly FlyCamera _camera = new();
     private readonly RemotePlayers _players = new();
     private readonly ClientClock _clock = new();
@@ -205,6 +212,11 @@ public sealed class Game
         _generator = new WorldGen(_connection.Seed, _data.Blocks);
         _world = new StreamingWorld(_gl, _data, _connection);
 
+        if (_options.ForceTimeTicks is long forced)
+        {
+            _clock.Force(forced, Constants.DayLengthTicks);
+        }
+
         var start = _options.StartPosition ?? (_connection.Spawn.X, _connection.Spawn.Y, _connection.Spawn.Z);
         _camera.X = (float)start.X;
         _camera.Y = (float)start.Y;
@@ -223,6 +235,15 @@ public sealed class Game
         _cubeTriangles = ColorMesh.UnitCubeTriangles(_gl);
         _atlasTexture = CreateAtlasTexture();
         _gl.Enable(EnableCap.DepthTest);
+
+        // ---- Render pipeline (plan 02 M0): offscreen scene + composite + timers
+        string shaderDir = Path.Combine(_options.RepoRoot, "shaders");
+        _postChain = new PostChain(_gl, shaderDir, _window.FramebufferSize.X, _window.FramebufferSize.Y);
+        _skyRenderer = new SkyRenderer(_gl, shaderDir);
+        _timerSky = new GpuTimer(_gl, "sky");
+        _timerWorld = new GpuTimer(_gl, "world");
+        _timerUi = new GpuTimer(_gl, "ui");
+        _window.FramebufferResize += size => _postChain.Resize(size.X, size.Y);
 
         // ---- GUI system -----------------------------------------------------
         _settings = Settings.Load(Path.Combine(_options.RepoRoot, "settings.json"));
@@ -370,30 +391,51 @@ public sealed class Game
 
     private void OnRender(double dt)
     {
-        // Hell atmosphere: fade sky/fog to dark red approaching the boundary.
-        double hellB = _generator.HellBoundary(_camera.X, _camera.Z);
-        float hellT = (float)Math.Clamp((hellB + 24 - _camera.Y) / 32, 0, 1);
-        float skyR = SurfaceSky.R + (HellSky.R - SurfaceSky.R) * hellT;
-        float skyG = SurfaceSky.G + (HellSky.G - SurfaceSky.G) * hellT;
-        float skyB = SurfaceSky.B + (HellSky.B - SurfaceSky.B) * hellT;
-        float fogNear = FogNear + (12 - FogNear) * hellT;
-        float fogFar = FogFar + (64 - FogFar) * hellT;
-
-        _gl.ClearColor(skyR, skyG, skyB, 1f);
-        _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
-
         var size = _window.FramebufferSize;
         float aspect = size.X / (float)Math.Max(1, size.Y);
+        const float fovY = 75f * MathF.PI / 180f;
+
+        // Day/night sky from the world clock; blend toward hell red underground.
+        var sky = SkyState.Compute(_clock.WorldTicks, _clock.DayLengthTicks);
+        double hellB = _generator.HellBoundary(_camera.X, _camera.Z);
+        float hellT = (float)Math.Clamp((hellB + 24 - _camera.Y) / 32, 0, 1);
+        (float R, float G, float B) Blend((float R, float G, float B) c, (float R, float G, float B) h, float t)
+            => (c.R + (h.R - c.R) * t, c.G + (h.G - c.G) * t, c.B + (h.B - c.B) * t);
+        var horizon = Blend(sky.Horizon, HellSky, hellT);
+        var zenith = Blend(sky.Zenith, HellSky, hellT);
+        float fogNear = FogNear + (12 - FogNear) * hellT;
+        float fogFar = FogFar + (64 - FogFar) * hellT;
+        // World ambient: day/night curve on the surface, a fixed glow in hell.
+        float dayBrightness = 0.16f + 0.84f * sky.DayAmount;
+        float worldBrightness = dayBrightness + (0.6f - dayBrightness) * hellT;
+
+        // Camera basis for the sky ray reconstruction.
+        var (fx, fy, fz) = AimDirection();
+        var forward = ((float)fx, (float)fy, (float)fz);
+        var right = Normalize(Cross(forward, (0f, 1f, 0f)));
+        var up = Cross(right, forward);
+
+        // ---- Scene pass (offscreen) -----------------------------------------
+        _postChain.BeginScene();
+        _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
+
+        _timerSky.Begin();
+        var hellSky = new SkyState(sky.SunDir, zenith, horizon, sky.SunDiscColor, sky.LightColor, sky.DayAmount, sky.MoonVisibility);
+        _skyRenderer.Render(in hellSky, forward, right, up, MathF.Tan(fovY / 2f), aspect);
+        _timerSky.End();
+
+        _timerWorld.Begin();
         float[] viewProj = Mat4.Multiply(
-            Mat4.PerspectiveGl(75f * MathF.PI / 180f, aspect, 0.1f, 1000f),
+            Mat4.PerspectiveGl(fovY, aspect, 0.1f, 1000f),
             Mat4.View(_camera.X, _camera.Y, _camera.Z, _camera.Yaw, _camera.Pitch));
 
         _shader.Use();
         _shader.SetMatrix("uViewProj", viewProj);
         _shader.SetVec3("uCameraPos", _camera.X, _camera.Y, _camera.Z);
-        _shader.SetVec3("uFogColor", skyR, skyG, skyB);
+        _shader.SetVec3("uFogColor", horizon.R, horizon.G, horizon.B);
         _shader.SetFloat("uFogNear", fogNear);
         _shader.SetFloat("uFogFar", fogFar);
+        _shader.SetFloat("uDayBrightness", worldBrightness);
         _shader.SetInt("uAtlas", 0);
         _gl.ActiveTexture(TextureUnit.Texture0);
         _gl.BindTexture(TextureTarget.Texture2DArray, _atlasTexture);
@@ -458,8 +500,13 @@ public sealed class Game
             _colorShader.SetFloat4("uColor", 0.07f, 0.07f, 0.07f, 1f);
             _cubeLines.Draw();
         }
+        _timerWorld.End();
 
-        // ---- UI overlay ------------------------------------------------------
+        // ---- Composite offscreen scene to the screen ------------------------
+        _postChain.Composite(size.X, size.Y);
+
+        // ---- UI overlay (drawn directly to the screen) ----------------------
+        _timerUi.Begin();
         _gl.Disable(EnableCap.DepthTest);
         _gl.Disable(EnableCap.CullFace);
         _gl.Enable(EnableCap.Blend);
@@ -475,6 +522,7 @@ public sealed class Game
             $"pos {_camera.X:F1} {_camera.Y:F1} {_camera.Z:F1}  biome {_generator.BiomeAt(_camera.X, _camera.Y, _camera.Z)}",
             $"chunks {stats.Loaded} loaded, {stats.Rendered} rendered  net {stats.AwaitingNet}  mesh {stats.PendingMesh} ({stats.Workers} workers)",
             $"hand {(held is null ? "empty" : _inventory.DisplayNameOf(held.Id))}  |  render distance {StreamingWorld.RenderRadius}",
+            $"gpu  sky {_timerSky.Milliseconds:F2}ms  world {_timerWorld.Milliseconds:F2}ms  ui {_timerUi.Milliseconds:F2}ms",
         ];
         for (int i = 0; i < hudLines.Length; i++)
         {
@@ -502,6 +550,7 @@ public sealed class Game
         _uiBatch.End();
         _gl.Enable(EnableCap.DepthTest);
         _gl.Disable(EnableCap.Blend);
+        _timerUi.End();
 
         _frameCount++;
         _fpsFrames++;
@@ -525,10 +574,20 @@ public sealed class Game
             var s = _world.Stats;
             Console.WriteLine(
                 $"[client] at screenshot: {s.Loaded} loaded, {s.Rendered} rendered, " +
-                $"{draws} draws, {triangles} tris, biome {_generator.BiomeAt(_camera.X, _camera.Y, _camera.Z)}");
+                $"{draws} draws, {triangles} tris, biome {_generator.BiomeAt(_camera.X, _camera.Y, _camera.Z)}, " +
+                $"time {_clock.Describe()}, gpu sky/world/ui {_timerSky.Milliseconds:F2}/{_timerWorld.Milliseconds:F2}/{_timerUi.Milliseconds:F2}ms");
             SaveScreenshot(_options.ScreenshotPath);
             _window.Close();
         }
+    }
+
+    private static (float X, float Y, float Z) Cross((float X, float Y, float Z) a, (float X, float Y, float Z) b)
+        => (a.Y * b.Z - a.Z * b.Y, a.Z * b.X - a.X * b.Z, a.X * b.Y - a.Y * b.X);
+
+    private static (float X, float Y, float Z) Normalize((float X, float Y, float Z) v)
+    {
+        float len = MathF.Sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z);
+        return len > 1e-6f ? (v.X / len, v.Y / len, v.Z / len) : v;
     }
 
     private static (float X, float Y)? ProjectToScreen(float[] m, float x, float y, float z, int w, int h)
