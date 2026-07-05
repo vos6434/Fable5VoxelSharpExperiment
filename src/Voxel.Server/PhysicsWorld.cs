@@ -29,6 +29,8 @@ public sealed class PhysicsWorld : IDisposable
         public required ushort DimZ { get; init; }
         /// <summary>Grid blocks (x-fastest,z,y) for the spawn payload / client mesh.</summary>
         public required ushort[] Blocks { get; init; }
+        /// <summary>Center-of-mass in grid-local coords (body origin = grid corner + pivot).</summary>
+        public required Vector3 Pivot { get; init; }
     }
 
     private const int S = Constants.ChunkSize;
@@ -91,6 +93,61 @@ public sealed class PhysicsWorld : IDisposable
             Body = body,
             DimX = 1, DimY = 1, DimZ = 1,
             Blocks = [blockId],
+            Pivot = new Vector3(0.5f, 0.5f, 0.5f),
+        };
+        _entities[entity.Id] = entity;
+        return entity;
+    }
+
+    /// <summary>
+    /// Spawns a contraption from a glued block grid: greedy-merged boxes form a
+    /// dynamic Bepu compound, mass ∝ block count. Returns the entity (its Pivot
+    /// is the center of mass in grid-local coords) for the caller to broadcast.
+    /// </summary>
+    public Entity SpawnContraption(int minX, int minY, int minZ, int dimX, int dimY, int dimZ, ushort[] blocks)
+    {
+        int Index(int x, int y, int z) => (y * dimZ + z) * dimX + x;
+        var consumed = new bool[dimX * dimY * dimZ];
+        bool Solid(int x, int y, int z) => !consumed[Index(x, y, z)] && blocks[Index(x, y, z)] != 0;
+
+        using var builder = new CompoundBuilder(_pool, _sim.Shapes, 8);
+        for (int y = 0; y < dimY; y++)
+        for (int z = 0; z < dimZ; z++)
+        for (int x = 0; x < dimX; x++)
+        {
+            if (!Solid(x, y, z)) continue;
+            int w = 1; while (x + w < dimX && Solid(x + w, y, z)) w++;
+            int h = 1;
+            bool Row(int yy) { for (int i = 0; i < w; i++) if (!Solid(x + i, yy, z)) return false; return true; }
+            while (y + h < dimY && Row(y + h)) h++;
+            int d = 1;
+            bool Slab(int zz) { for (int j = 0; j < h; j++) for (int i = 0; i < w; i++) if (!Solid(x + i, y + j, zz)) return false; return true; }
+            while (z + d < dimZ && Slab(z + d)) d++;
+            for (int j = 0; j < h; j++) for (int k = 0; k < d; k++) for (int i = 0; i < w; i++)
+                consumed[Index(x + i, y + j, z + k)] = true;
+
+            var local = new RigidPose(new Vector3(x + w / 2f, y + h / 2f, z + d / 2f));
+            builder.Add(new Box(w, h, d), local, w * h * d); // weight ∝ volume
+        }
+
+        builder.BuildDynamicCompound(out var children, out var inertia, out var center);
+        var compound = _sim.Shapes.Add(new Compound(children));
+        var position = new Vector3(minX, minY, minZ) + center;
+
+        var body = _sim.Bodies.Add(BodyDescription.CreateDynamic(
+            new RigidPose(position),
+            inertia,
+            new CollidableDescription(compound, 0.1f, ContinuousDetection.Continuous(1e-3f, 1e-3f)),
+            new BodyActivityDescription(0.01f)));
+
+        var entity = new Entity
+        {
+            Id = _nextId++,
+            Kind = 1,
+            Body = body,
+            DimX = (ushort)dimX, DimY = (ushort)dimY, DimZ = (ushort)dimZ,
+            Blocks = blocks,
+            Pivot = center,
         };
         _entities[entity.Id] = entity;
         return entity;
@@ -211,6 +268,14 @@ public sealed class PhysicsWorld : IDisposable
     }
 
     public bool IsAwake(Entity e) => _sim.Bodies[e.Body].Awake;
+
+    /// <summary>Adds angular velocity to a body (debug: makes a test contraption topple).</summary>
+    public void Nudge(Entity e, Vector3 angularVelocity)
+    {
+        var body = _sim.Bodies[e.Body];
+        body.Velocity.Angular += angularVelocity;
+        body.Awake = true;
+    }
 
     public void Dispose()
     {

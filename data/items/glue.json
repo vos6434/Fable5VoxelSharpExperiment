@@ -1,0 +1,6 @@
+{
+  "id": "glue",
+  "name": "Glue",
+  "icon": "glue_icon.png",
+  "maxStack": 64
+}

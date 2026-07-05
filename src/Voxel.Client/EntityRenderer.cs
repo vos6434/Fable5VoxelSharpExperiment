@@ -16,6 +16,7 @@ public sealed class EntityRenderer : IDisposable
     private sealed class Entity
     {
         public required int DimX, DimY, DimZ;
+        public required float PivotX, PivotY, PivotZ;
         public required ChunkMesh Mesh;
         // Rendered (smoothed) pose.
         public float X, Y, Z;
@@ -75,6 +76,7 @@ public sealed class EntityRenderer : IDisposable
         _entities[s.Id] = new Entity
         {
             DimX = s.DimX, DimY = s.DimY, DimZ = s.DimZ,
+            PivotX = s.PivotX, PivotY = s.PivotY, PivotZ = s.PivotZ,
             Mesh = new ChunkMesh(_gl, pass),
             X = (float)s.X, Y = (float)s.Y, Z = (float)s.Z,
             Qx = s.Qx, Qy = s.Qy, Qz = s.Qz, Qw = s.Qw,
@@ -106,10 +108,11 @@ public sealed class EntityRenderer : IDisposable
         shader.SetVec3("uChunkOrigin", 0, 0, 0);
         foreach (var e in _entities.Values)
         {
-            // model = T(pos) * R(quat) * T(-halfDims): center the grid on the body.
+            // model = T(pos) * R(quat) * T(-pivot): the body origin is the grid
+            // corner + pivot (center of mass), so shift the grid back by -pivot.
             float[] model = Mat4.Multiply(
                 Mat4.Multiply(Mat4.Translation(e.X, e.Y, e.Z), Mat4.FromQuaternion(e.Qx, e.Qy, e.Qz, e.Qw)),
-                Mat4.Translation(-e.DimX / 2f, -e.DimY / 2f, -e.DimZ / 2f));
+                Mat4.Translation(-e.PivotX, -e.PivotY, -e.PivotZ));
             shader.SetMatrix("uModel", model);
             e.Mesh.Draw();
         }

@@ -28,6 +28,8 @@ public sealed class GameServer
         public required Channel<byte[]> Outbox { get; init; }
         public double X, Y, Z;
         public float Yaw, Pitch;
+        /// <summary>Blocks this player has glue-marked (plan 03 M3); only their own thread touches it.</summary>
+        public readonly HashSet<(int X, int Y, int Z)> GlueMarks = new();
     }
 
     private readonly WorldStore _store;
@@ -111,7 +113,117 @@ public sealed class GameServer
         }
         return Protocol.EncodeEntitySpawn(
             e.Id, e.Kind, e.DimX, e.DimY, e.DimZ,
-            pos.X, pos.Y, pos.Z, rot.X, rot.Y, rot.Z, rot.W, output.ToArray());
+            pos.X, pos.Y, pos.Z, rot.X, rot.Y, rot.Z, rot.W,
+            e.Pivot.X, e.Pivot.Y, e.Pivot.Z, output.ToArray());
+    }
+
+    // ---- Glue → contraption (plan 03 M3) --------------------------------------
+
+    private const int MaxContraptionBlocks = 1000;
+
+    private ushort GetWorldBlock(int x, int y, int z)
+    {
+        lock (_worldLock)
+        {
+            return _store.Load(Coords.WorldToChunk(x), Coords.WorldToChunk(y), Coords.WorldToChunk(z))
+                .Get(Coords.WorldToLocal(x), Coords.WorldToLocal(y), Coords.WorldToLocal(z));
+        }
+    }
+
+    /// <summary>A block can be glued if it's a breakable solid (excludes air, liquids, bedrock).</summary>
+    private bool IsGlueable(ushort id)
+    {
+        if (id == 0 || id >= _blocks.Count) return false;
+        var def = _blocks.Get(id);
+        return def.Collision == Collision.Solid && def.Hardness >= 0;
+    }
+
+    private static bool FaceAdjacent((int X, int Y, int Z) p, HashSet<(int, int, int)> set) =>
+        set.Contains((p.X + 1, p.Y, p.Z)) || set.Contains((p.X - 1, p.Y, p.Z)) ||
+        set.Contains((p.X, p.Y + 1, p.Z)) || set.Contains((p.X, p.Y - 1, p.Z)) ||
+        set.Contains((p.X, p.Y, p.Z + 1)) || set.Contains((p.X, p.Y, p.Z - 1));
+
+    private void HandleUseItem(Client client, (Protocol.ItemAction Action, int X, int Y, int Z) use)
+    {
+        switch (use.Action)
+        {
+            case Protocol.ItemAction.GlueMark:
+            {
+                var p = (use.X, use.Y, use.Z);
+                if (client.GlueMarks.Contains(p) || client.GlueMarks.Count >= MaxContraptionBlocks) break;
+                if (!IsGlueable(GetWorldBlock(use.X, use.Y, use.Z))) break;
+                // The set must stay one face-connected piece.
+                if (client.GlueMarks.Count > 0 && !FaceAdjacent(p, client.GlueMarks)) break;
+                client.GlueMarks.Add(p);
+                client.Outbox.Writer.TryWrite(Protocol.EncodeGlueMarks([.. client.GlueMarks]));
+                break;
+            }
+            case Protocol.ItemAction.GlueClear:
+                client.GlueMarks.Clear();
+                client.Outbox.Writer.TryWrite(Protocol.EncodeGlueMarks([]));
+                break;
+            case Protocol.ItemAction.GlueActivate:
+            {
+                if (client.GlueMarks.Count == 0) break;
+                var marks = client.GlueMarks.ToList();
+                client.GlueMarks.Clear();
+                client.Outbox.Writer.TryWrite(Protocol.EncodeGlueMarks([]));
+                _tickActions.Enqueue(() => ActivateContraption(marks));
+                break;
+            }
+        }
+    }
+
+    /// <summary>Debug: place a thin stone wall in the air and glue it into a contraption that falls.</summary>
+    public void RequestTestContraption(int baseX, int baseY, int baseZ)
+    {
+        _tickActions.Enqueue(() =>
+        {
+            ushort stone = _blocks.Resolve("stone");
+            var positions = new List<(int, int, int)>();
+            for (int yi = 0; yi < 5; yi++)
+            for (int xi = 0; xi < 3; xi++)
+            {
+                var p = (baseX + xi, baseY + yi, baseZ);
+                lock (_worldLock) _store.SetBlock(p.Item1, p.Item2, p.Item3, stone);
+                Broadcast(Protocol.EncodeBlockChange(Msg.BlockUpdate, p.Item1, p.Item2, p.Item3, stone));
+                _physics.InvalidateChunk(Coords.WorldToChunk(p.Item1), Coords.WorldToChunk(p.Item2), Coords.WorldToChunk(p.Item3));
+                positions.Add(p);
+            }
+            var entity = ActivateContraption(positions);
+            // Topple it so the "falls over as one object" behavior is obvious.
+            if (entity is not null) _physics.Nudge(entity, new Vector3(0, 0, -2.5f));
+        });
+    }
+
+    private PhysicsWorld.Entity? ActivateContraption(List<(int X, int Y, int Z)> marks)
+    {
+        if (marks.Count is 0 or > MaxContraptionBlocks) return null;
+        int minX = marks.Min(m => m.X), minY = marks.Min(m => m.Y), minZ = marks.Min(m => m.Z);
+        int maxX = marks.Max(m => m.X), maxY = marks.Max(m => m.Y), maxZ = marks.Max(m => m.Z);
+        int dimX = maxX - minX + 1, dimY = maxY - minY + 1, dimZ = maxZ - minZ + 1;
+
+        var blocks = new ushort[dimX * dimY * dimZ];
+        int placed = 0;
+        foreach (var (x, y, z) in marks)
+        {
+            ushort id = GetWorldBlock(x, y, z);
+            if (!IsGlueable(id)) continue; // vanished/edited since marking
+            blocks[((y - minY) * dimZ + (z - minZ)) * dimX + (x - minX)] = id;
+            lock (_worldLock) _store.SetBlock(x, y, z, 0);
+            Broadcast(Protocol.EncodeBlockChange(Msg.BlockUpdate, x, y, z, 0));
+            _physics.InvalidateChunk(Coords.WorldToChunk(x), Coords.WorldToChunk(y), Coords.WorldToChunk(z));
+            placed++;
+        }
+        if (placed == 0) return null;
+
+        var entity = _physics.SpawnContraption(minX, minY, minZ, dimX, dimY, dimZ, blocks);
+        var (pos, rot, _) = _physics.GetState(entity);
+        byte[] payload = EncodeSpawn(entity, pos, rot);
+        _spawnPayloads[entity.Id] = payload;
+        Broadcast(payload);
+        Console.WriteLine($"[server] contraption #{entity.Id}: {placed} blocks, dims {dimX}x{dimY}x{dimZ}");
+        return entity;
     }
 
     private void BroadcastEntityStates()
@@ -283,6 +395,9 @@ public sealed class GameServer
                 _tickActions.Enqueue(() => _physics.InvalidateChunk(ecx, ecy, ecz));
                 break;
             }
+            case Msg.UseItem:
+                HandleUseItem(client, Protocol.DecodeUseItem(data));
+                break;
             case Msg.TimeControl:
             {
                 // Debug menu: any client may scrub/pause world time (same trust

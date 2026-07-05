@@ -9,7 +9,7 @@ public class EntityProtocolTests
     {
         byte[] blocks = [1, 2, 3, 4];
         byte[] encoded = Protocol.EncodeEntitySpawn(
-            42, 0, 2, 1, 2, -16.5, 20.0, -32.25, 0.1f, 0.2f, 0.3f, 0.9f, blocks);
+            42, 0, 2, 1, 2, -16.5, 20.0, -32.25, 0.1f, 0.2f, 0.3f, 0.9f, 1f, 0.5f, 1f, blocks);
         Assert.Equal(Msg.EntitySpawn, Protocol.TypeOf(encoded));
 
         var d = Protocol.DecodeEntitySpawn(encoded);
@@ -22,6 +22,8 @@ public class EntityProtocolTests
         Assert.Equal(20.0, d.Y);
         Assert.Equal(-32.25, d.Z);
         Assert.Equal(0.9f, d.Qw);
+        Assert.Equal(1f, d.PivotX);
+        Assert.Equal(0.5f, d.PivotY);
         Assert.Equal(blocks, d.CompressedBlocks.ToArray());
     }
 
@@ -48,5 +50,24 @@ public class EntityProtocolTests
         var (id, became) = Protocol.DecodeEntityDespawn(encoded);
         Assert.Equal(7u, id);
         Assert.True(became);
+    }
+
+    [Fact]
+    public void UseItem_round_trips()
+    {
+        byte[] encoded = Protocol.EncodeUseItem(Protocol.ItemAction.GlueMark, -5, 129, 7);
+        Assert.Equal(Msg.UseItem, Protocol.TypeOf(encoded));
+        var (action, x, y, z) = Protocol.DecodeUseItem(encoded);
+        Assert.Equal(Protocol.ItemAction.GlueMark, action);
+        Assert.Equal((-5, 129, 7), (x, y, z));
+    }
+
+    [Fact]
+    public void GlueMarks_round_trip()
+    {
+        (int, int, int)[] marks = [(0, 0, 0), (-1, 2, -3), (100000, -200000, 300000)];
+        byte[] encoded = Protocol.EncodeGlueMarks(marks);
+        Assert.Equal(Msg.GlueMarks, Protocol.TypeOf(encoded));
+        Assert.Equal(marks, Protocol.DecodeGlueMarks(encoded));
     }
 }

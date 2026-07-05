@@ -75,6 +75,20 @@ _ = Task.Run(() =>
             continue;
         }
 
+        // contraption [x y z] — place a stone wall in the air and glue it (plan 03 M3).
+        if (parts[0] == "contraption")
+        {
+            var spawn = generator.FindSpawn();
+            int cbx = spawn.X, cby = WorldGen.SeaLevel + 16, cbz = spawn.Z;
+            if (parts.Length >= 4 &&
+                int.TryParse(parts[1], out int qx) && int.TryParse(parts[2], out int qy) && int.TryParse(parts[3], out int qz))
+            {
+                (cbx, cby, cbz) = (qx, qy, qz);
+            }
+            gameServer.RequestTestContraption(cbx, cby, cbz);
+            continue;
+        }
+
         if (parts[0] != "tick")
         {
             Console.WriteLine("[server] commands: spawn [x y z] | tick rate <x> | tick pause | tick resume | tick step [n] | tick status");

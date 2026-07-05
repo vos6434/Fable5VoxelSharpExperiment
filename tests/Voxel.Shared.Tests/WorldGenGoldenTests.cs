@@ -20,12 +20,19 @@ public class WorldGenGoldenTests
     }
 
     [Fact]
-    public void Item_registry_matches()
+    public void Item_registry_preserves_the_original_items()
     {
+        // Subset check: the golden items must still exist with the same
+        // maxStacks (items aren't determinism-critical like the block palette),
+        // but new C#-only items (e.g. glue) may be added.
         var g = Golden.Instance;
         var items = Registries.Value.Items;
-        Assert.Equal(g.ItemIds, items.Defs.Select(d => d.StringId).ToArray());
-        Assert.Equal(g.ItemMaxStacks, items.Defs.Select(d => d.MaxStack).ToArray());
+        for (int i = 0; i < g.ItemIds.Length; i++)
+        {
+            var def = items.ById(g.ItemIds[i]);
+            Assert.NotNull(def);
+            Assert.Equal(g.ItemMaxStacks[i], def!.MaxStack);
+        }
     }
 
     [Fact]

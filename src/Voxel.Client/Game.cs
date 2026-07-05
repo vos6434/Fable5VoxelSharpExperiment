@@ -69,6 +69,7 @@ public sealed class Game
     private readonly RemotePlayers _players = new();
     private readonly ClientClock _clock = new();
     private EntityRenderer _entities = null!;
+    private (int X, int Y, int Z)[] _glueMarks = [];
     private static readonly float[] IdentityMat = Mat4.Identity();
 
     private Settings _settings = null!;
@@ -139,6 +140,19 @@ public sealed class Game
             int uiButton = button == MouseButton.Right ? 2 : 0;
             if (_camera.Captured)
             {
+                // Glue in hand: RMB marks the aimed block, Shift+RMB activates
+                // the marked set into a contraption, LMB clears the marks.
+                if (_inventory.SelectedStack()?.Id == "glue")
+                {
+                    bool shift = _keyboard.IsKeyPressed(Key.ShiftLeft) || _keyboard.IsKeyPressed(Key.ShiftRight);
+                    if (button == MouseButton.Right && shift)
+                        _connection.SendUseItem(Protocol.ItemAction.GlueActivate, 0, 0, 0);
+                    else if (button == MouseButton.Right && Aim() is RaycastHit h)
+                        _connection.SendUseItem(Protocol.ItemAction.GlueMark, h.X, h.Y, h.Z);
+                    else if (button == MouseButton.Left)
+                        _connection.SendUseItem(Protocol.ItemAction.GlueClear, 0, 0, 0);
+                    return;
+                }
                 if (button == MouseButton.Left) BreakTargeted();
                 else if (button == MouseButton.Right) PlaceAtTarget();
                 return;
@@ -399,6 +413,10 @@ public sealed class Game
             {
                 _clock.OnSync(sync.WorldTick, sync.Timescale, sync.DayLengthTicks);
             }
+            else if (evt is ServerEvent.GlueMarksUpdated glue)
+            {
+                _glueMarks = glue.Marks;
+            }
         }
 
         _world.Update(_camera.X, _camera.Y, _camera.Z);
@@ -632,6 +650,14 @@ public sealed class Game
             _colorShader.SetFloat4("uColor", p.Color.R, p.Color.G, p.Color.B, 1f);
             _cubeTriangles.Draw();
             draws++;
+        }
+        // Glue marks: highlight the blocks staged for the next contraption.
+        foreach (var (mx, my, mz) in _glueMarks)
+        {
+            _colorShader.SetVec3("uOrigin", mx - 0.003f, my - 0.003f, mz - 0.003f);
+            _colorShader.SetVec3("uScale", 1.006f, 1.006f, 1.006f);
+            _colorShader.SetFloat4("uColor", 1f, 0.85f, 0.2f, 1f);
+            _cubeLines.Draw();
         }
         if (_target is RaycastHit target)
         {

@@ -20,9 +20,11 @@ public abstract record ServerEvent
     public sealed record PlayerMoved(PlayerMove[] Moves) : ServerEvent;
     public sealed record TimeSynced(long WorldTick, float Timescale, int DayLengthTicks) : ServerEvent;
     public sealed record EntitySpawned(uint Id, byte Kind, int DimX, int DimY, int DimZ,
-        double X, double Y, double Z, float Qx, float Qy, float Qz, float Qw, ushort[] Blocks) : ServerEvent;
+        double X, double Y, double Z, float Qx, float Qy, float Qz, float Qw,
+        float PivotX, float PivotY, float PivotZ, ushort[] Blocks) : ServerEvent;
     public sealed record EntityStates(Protocol.EntityState[] States) : ServerEvent;
     public sealed record EntityDespawned(uint Id, bool BecameBlocks) : ServerEvent;
+    public sealed record GlueMarksUpdated((int X, int Y, int Z)[] Marks) : ServerEvent;
     public sealed record Disconnected(string Reason) : ServerEvent;
 }
 
@@ -98,6 +100,9 @@ public sealed class Connection : IDisposable
 
     public void SendSetBlock(int x, int y, int z, ushort blockId) =>
         _outbox.Writer.TryWrite(Protocol.EncodeBlockChange(Msg.SetBlock, x, y, z, blockId));
+
+    public void SendUseItem(Protocol.ItemAction action, int x, int y, int z) =>
+        _outbox.Writer.TryWrite(Protocol.EncodeUseItem(action, x, y, z));
 
     /// <summary>Debug menu: scrub world time and/or set timescale (-1 = leave unchanged).</summary>
     public void SendTimeControl(long setTick, float timescale) =>
@@ -194,7 +199,8 @@ public sealed class Connection : IDisposable
                 var blocks = new ushort[volume];
                 Buffer.BlockCopy(raw, 0, blocks, 0, Math.Min(raw.Length, volume * 2));
                 Events.Enqueue(new ServerEvent.EntitySpawned(
-                    d.Id, d.Kind, d.DimX, d.DimY, d.DimZ, d.X, d.Y, d.Z, d.Qx, d.Qy, d.Qz, d.Qw, blocks));
+                    d.Id, d.Kind, d.DimX, d.DimY, d.DimZ, d.X, d.Y, d.Z, d.Qx, d.Qy, d.Qz, d.Qw,
+                    d.PivotX, d.PivotY, d.PivotZ, blocks));
                 break;
             }
             case Msg.EntityState:
@@ -206,6 +212,9 @@ public sealed class Connection : IDisposable
                 Events.Enqueue(new ServerEvent.EntityDespawned(id, became));
                 break;
             }
+            case Msg.GlueMarks:
+                Events.Enqueue(new ServerEvent.GlueMarksUpdated(Protocol.DecodeGlueMarks(message)));
+                break;
             default:
                 break;
         }

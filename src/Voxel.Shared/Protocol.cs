@@ -18,6 +18,7 @@ public enum Msg : byte
     Move = 3,         // f64 x,y,z, f32 yaw, f32 pitch
     SetBlock = 4,     // i32 x,y,z, u16 blockId (0 = break)
     TimeControl = 5,  // i64 setTick (-1 = no change), f32 timescale (<0 = no change)
+    UseItem = 6,      // u8 action (0=glue mark, 1=glue activate, 2=glue clear), i32 x,y,z
     // server → client
     Welcome = 10,     // JSON { playerId, seed, spawn, palette, protocolVersion }
     ChunkData = 11,   // i32 cx,cy,cz, u8 empty, [deflate-raw u16 LE blocks]
@@ -27,9 +28,10 @@ public enum Msg : byte
     PlayerMoves = 15, // u16 count, count x (u16 id, f32 x,y,z,yaw,pitch)
     TimeSync = 16,    // i64 worldTick, f32 timescale, i32 dayLengthTicks
     // Physics entities (plan 03): contraptions and debug bodies.
-    EntitySpawn = 17,   // u32 id, u8 kind, u16 dimX,dimY,dimZ, f64 x,y,z, f32 qx,qy,qz,qw, [deflate-raw u16 blocks]
+    EntitySpawn = 17,   // u32 id, u8 kind, u16 dimX,dimY,dimZ, f64 x,y,z, f32 qx,qy,qz,qw, f32 pivotX,Y,Z, [deflate-raw u16 blocks]
     EntityState = 18,   // u16 count, count x (u32 id, f32 x,y,z, f32 qx,qy,qz,qw, f32 vx,vy,vz)
     EntityDespawn = 19, // u32 id, u8 becameBlocks
+    GlueMarks = 20,     // u16 count, count x (i32 x,y,z) — the marking player's overlay
 }
 
 public sealed class WelcomePayload
@@ -84,9 +86,10 @@ public static class Protocol
     /// Hello with a clear close reason instead of decoding garbage.
     /// History: 1 = launch (implicit), 2 = version handshake + TimeSync,
     /// 3 = TimeControl (debug menu time slider / pause),
-    /// 4 = physics entities (spawn/state/despawn).
+    /// 4 = physics entities (spawn/state/despawn),
+    /// 5 = UseItem + glue marks + EntitySpawn pivot (contraptions).
     /// </summary>
-    public const int Version = 4;
+    public const int Version = 5;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -223,14 +226,17 @@ public static class Protocol
     public readonly record struct EntitySpawnData(
         uint Id, byte Kind, ushort DimX, ushort DimY, ushort DimZ,
         double X, double Y, double Z, float Qx, float Qy, float Qz, float Qw,
+        float PivotX, float PivotY, float PivotZ,
         ReadOnlyMemory<byte> CompressedBlocks);
+
+    private const int EntitySpawnHeader = 64; // 1+4+1+6+24+16+12
 
     public static byte[] EncodeEntitySpawn(
         uint id, byte kind, ushort dimX, ushort dimY, ushort dimZ,
         double x, double y, double z, float qx, float qy, float qz, float qw,
-        byte[] compressedBlocks)
+        float pivotX, float pivotY, float pivotZ, byte[] compressedBlocks)
     {
-        var outBuf = new byte[1 + 4 + 1 + 6 + 24 + 16 + compressedBlocks.Length];
+        var outBuf = new byte[EntitySpawnHeader + compressedBlocks.Length];
         var s = outBuf.AsSpan();
         s[0] = (byte)Msg.EntitySpawn;
         BinaryPrimitives.WriteUInt32LittleEndian(s[1..], id);
@@ -245,7 +251,10 @@ public static class Protocol
         BinaryPrimitives.WriteSingleLittleEndian(s[40..], qy);
         BinaryPrimitives.WriteSingleLittleEndian(s[44..], qz);
         BinaryPrimitives.WriteSingleLittleEndian(s[48..], qw);
-        compressedBlocks.CopyTo(outBuf, 52);
+        BinaryPrimitives.WriteSingleLittleEndian(s[52..], pivotX);
+        BinaryPrimitives.WriteSingleLittleEndian(s[56..], pivotY);
+        BinaryPrimitives.WriteSingleLittleEndian(s[60..], pivotZ);
+        compressedBlocks.CopyTo(outBuf, EntitySpawnHeader);
         return outBuf;
     }
 
@@ -265,7 +274,61 @@ public static class Protocol
             BinaryPrimitives.ReadSingleLittleEndian(s[40..]),
             BinaryPrimitives.ReadSingleLittleEndian(s[44..]),
             BinaryPrimitives.ReadSingleLittleEndian(s[48..]),
-            message[52..]);
+            BinaryPrimitives.ReadSingleLittleEndian(s[52..]),
+            BinaryPrimitives.ReadSingleLittleEndian(s[56..]),
+            BinaryPrimitives.ReadSingleLittleEndian(s[60..]),
+            message[EntitySpawnHeader..]);
+    }
+
+    // ---- UseItem / glue (plan 03 M3) ------------------------------------------
+
+    public enum ItemAction : byte { GlueMark = 0, GlueActivate = 1, GlueClear = 2 }
+
+    public static byte[] EncodeUseItem(ItemAction action, int x, int y, int z)
+    {
+        var outBuf = new byte[14];
+        outBuf[0] = (byte)Msg.UseItem;
+        outBuf[1] = (byte)action;
+        BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(2), x);
+        BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(6), y);
+        BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(10), z);
+        return outBuf;
+    }
+
+    public static (ItemAction Action, int X, int Y, int Z) DecodeUseItem(ReadOnlySpan<byte> message)
+        => ((ItemAction)message[1],
+            BinaryPrimitives.ReadInt32LittleEndian(message[2..]),
+            BinaryPrimitives.ReadInt32LittleEndian(message[6..]),
+            BinaryPrimitives.ReadInt32LittleEndian(message[10..]));
+
+    public static byte[] EncodeGlueMarks(IReadOnlyList<(int X, int Y, int Z)> marks)
+    {
+        var outBuf = new byte[3 + marks.Count * 12];
+        outBuf[0] = (byte)Msg.GlueMarks;
+        BinaryPrimitives.WriteUInt16LittleEndian(outBuf.AsSpan(1), (ushort)marks.Count);
+        for (int i = 0; i < marks.Count; i++)
+        {
+            int o = 3 + i * 12;
+            BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(o), marks[i].X);
+            BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(o + 4), marks[i].Y);
+            BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(o + 8), marks[i].Z);
+        }
+        return outBuf;
+    }
+
+    public static (int X, int Y, int Z)[] DecodeGlueMarks(ReadOnlySpan<byte> message)
+    {
+        int count = BinaryPrimitives.ReadUInt16LittleEndian(message[1..]);
+        var marks = new (int, int, int)[count];
+        for (int i = 0; i < count; i++)
+        {
+            int o = 3 + i * 12;
+            marks[i] = (
+                BinaryPrimitives.ReadInt32LittleEndian(message[o..]),
+                BinaryPrimitives.ReadInt32LittleEndian(message[(o + 4)..]),
+                BinaryPrimitives.ReadInt32LittleEndian(message[(o + 8)..]));
+        }
+        return marks;
     }
 
     public readonly record struct EntityState(

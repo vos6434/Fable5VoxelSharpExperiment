@@ -128,6 +128,18 @@ and throws them. Server-authoritative, multiplayer-correct.
    lands and rests on the grass surface (colliders build as it falls).
 3. **Glue → contraption** — mark/flood/validate/spawn; a glued tower falls
    over as one object. Blocks vanish from the grid correctly for all clients.
+   **DONE (2026-07-05).** `glue` data item + protocol v5: `UseItem`
+   (mark/activate/clear) and `GlueMarks` overlay; EntitySpawn gained a pivot
+   (center of mass in grid-local coords). Server tracks a per-player marked
+   set (face-adjacency + glueable = breakable solid enforced, ≤1000);
+   activate flood-removes the blocks (BlockUpdates for all clients, collider
+   invalidation) and spawns a dynamic Bepu **Compound** of greedy-merged
+   boxes (mass ∝ block count). Client: glue in hand → RMB mark / Shift+RMB
+   activate / LMB clear, yellow mark overlay; the contraption renders through
+   the entity path (uModel = T(pos)·R(quat)·T(−pivot)). `contraption`
+   console command builds+glues a test wall. Verified: a 15-block 3×5×1 wall
+   glued mid-air fell as one rigid body and toppled flat on the terrain;
+   source blocks gone. 61 tests.
 4. **Physics gun** — grab/carry/scroll/throw with the servo constraint;
    two players fighting over one crate resolves cleanly (single holder).
 5. **Persistence + migration runner** — formatVersion-keyed migrations
