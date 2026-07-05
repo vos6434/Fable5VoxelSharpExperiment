@@ -2,6 +2,13 @@
 
 **Size:** S · **Depends on:** nothing · **Unblocks:** day/night (02), physics (03), map throttling (05)
 
+**STATUS: SHIPPED (2026-07-05).** All milestones verified: legacy clients
+rejected with close reason (1008), 20 TPS loop with TPS reporting, world
+time survives hard kills via the 100-tick periodic save, client HUD clock
+reconstructs time + timescale from TimeSync (verified at x5), console
+commands working. Note: timescale intentionally resets to x1 on restart
+(it's an admin control, not world state).
+
 ## Goal
 
 Give the game a Minecraft-style heartbeat: the server simulates the world in

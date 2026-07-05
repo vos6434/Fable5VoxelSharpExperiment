@@ -6,4 +6,10 @@ public static class Constants
     public const int ChunkSize = 16;
 
     public const int ChunkVolume = ChunkSize * ChunkSize * ChunkSize;
+
+    /// <summary>Simulation rate: the world advances in fixed 50 ms ticks.</summary>
+    public const int TicksPerSecond = 20;
+
+    /// <summary>Default full day-night cycle length (20 minutes at 20 TPS); server-configurable later.</summary>
+    public const int DayLengthTicks = 24_000;
 }

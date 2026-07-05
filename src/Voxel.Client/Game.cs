@@ -55,6 +55,7 @@ public sealed class Game
     private uint _atlasTexture;
     private readonly FlyCamera _camera = new();
     private readonly RemotePlayers _players = new();
+    private readonly ClientClock _clock = new();
 
     private Settings _settings = null!;
     private PlayerInventory _inventory = null!;
@@ -310,11 +311,15 @@ public sealed class Game
     {
         _camera.Update(_keyboard, (float)dt);
 
-        // Route server events: world takes chunks/blocks, players take the rest.
+        // Route server events: world takes chunks/blocks, players and clock take the rest.
         while (_connection.Events.TryDequeue(out var evt))
         {
             _world.HandleEvent(evt);
             _players.Handle(evt, _connection.PlayerId);
+            if (evt is ServerEvent.TimeSynced sync)
+            {
+                _clock.OnSync(sync.WorldTick, sync.Timescale, sync.DayLengthTicks);
+            }
         }
 
         _world.Update(_camera.X, _camera.Y, _camera.Z);
@@ -466,7 +471,7 @@ public sealed class Game
         string[] hudLines =
         [
             $"fps {_lastFps}  draws {draws}  tris {triangles}",
-            $"online as {_playerName} (#{_connection.PlayerId})  players {_players.Count + 1}",
+            $"online as {_playerName} (#{_connection.PlayerId})  players {_players.Count + 1}  |  {_clock.Describe()}",
             $"pos {_camera.X:F1} {_camera.Y:F1} {_camera.Z:F1}  biome {_generator.BiomeAt(_camera.X, _camera.Y, _camera.Z)}",
             $"chunks {stats.Loaded} loaded, {stats.Rendered} rendered  net {stats.AwaitingNet}  mesh {stats.PendingMesh} ({stats.Workers} workers)",
             $"hand {(held is null ? "empty" : _inventory.DisplayNameOf(held.Id))}  |  render distance {StreamingWorld.RenderRadius}",

@@ -13,17 +13,18 @@ namespace Voxel.Shared;
 public enum Msg : byte
 {
     // client → server
-    Hello = 1,        // JSON { name }
+    Hello = 1,        // JSON { name, protocolVersion }
     ChunkRequest = 2, // u16 count, count x (i32 cx, i32 cy, i32 cz)
     Move = 3,         // f64 x,y,z, f32 yaw, f32 pitch
     SetBlock = 4,     // i32 x,y,z, u16 blockId (0 = break)
     // server → client
-    Welcome = 10,     // JSON { playerId, seed, spawn, palette }
+    Welcome = 10,     // JSON { playerId, seed, spawn, palette, protocolVersion }
     ChunkData = 11,   // i32 cx,cy,cz, u8 empty, [deflate-raw u16 LE blocks]
     BlockUpdate = 12, // i32 x,y,z, u16 blockId
     PlayerJoin = 13,  // JSON { id, name }
     PlayerLeave = 14, // JSON { id }
     PlayerMoves = 15, // u16 count, count x (u16 id, f32 x,y,z,yaw,pitch)
+    TimeSync = 16,    // i64 worldTick, f32 timescale, i32 dayLengthTicks
 }
 
 public sealed class WelcomePayload
@@ -33,6 +34,7 @@ public sealed class WelcomePayload
     [JsonPropertyName("spawn")] public required SpawnPoint Spawn { get; init; }
     /// <summary>Server's block palette (stringIds by numericId); must match the client's.</summary>
     [JsonPropertyName("palette")] public required string[] Palette { get; init; }
+    [JsonPropertyName("protocolVersion")] public int ProtocolVersion { get; init; }
 }
 
 public sealed class SpawnPoint
@@ -56,6 +58,8 @@ public sealed class PlayerLeavePayload
 public sealed class HelloPayload
 {
     [JsonPropertyName("name")] public required string Name { get; init; }
+    /// <summary>Optional so pre-versioning clients decode cleanly (and get rejected with a clear reason).</summary>
+    [JsonPropertyName("protocolVersion")] public int ProtocolVersion { get; init; }
 }
 
 public readonly record struct PlayerMove(ushort Id, float X, float Y, float Z, float Yaw, float Pitch);
@@ -69,6 +73,13 @@ public readonly record struct ChunkDataHeader(int Cx, int Cy, int Cz, bool Empty
 public static class Protocol
 {
     public const int Port = 8081;
+
+    /// <summary>
+    /// Bumped on every wire-format change. Mismatched clients are rejected at
+    /// Hello with a clear close reason instead of decoding garbage.
+    /// History: 1 = launch (implicit), 2 = version handshake + TimeSync.
+    /// </summary>
+    public const int Version = 2;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -198,6 +209,26 @@ public static class Protocol
             BinaryPrimitives.ReadInt32LittleEndian(message[5..]),
             BinaryPrimitives.ReadInt32LittleEndian(message[9..]),
             BinaryPrimitives.ReadUInt16LittleEndian(message[13..]));
+    }
+
+    // ---- TimeSync -------------------------------------------------------------
+
+    public static byte[] EncodeTimeSync(long worldTick, float timescale, int dayLengthTicks)
+    {
+        var outBuf = new byte[17];
+        outBuf[0] = (byte)Msg.TimeSync;
+        BinaryPrimitives.WriteInt64LittleEndian(outBuf.AsSpan(1), worldTick);
+        BinaryPrimitives.WriteSingleLittleEndian(outBuf.AsSpan(9), timescale);
+        BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(13), dayLengthTicks);
+        return outBuf;
+    }
+
+    public static (long WorldTick, float Timescale, int DayLengthTicks) DecodeTimeSync(ReadOnlySpan<byte> message)
+    {
+        return (
+            BinaryPrimitives.ReadInt64LittleEndian(message[1..]),
+            BinaryPrimitives.ReadSingleLittleEndian(message[9..]),
+            BinaryPrimitives.ReadInt32LittleEndian(message[13..]));
     }
 
     // ---- PlayerMoves ----------------------------------------------------------

@@ -17,7 +17,6 @@ namespace Voxel.Server;
 public sealed class GameServer
 {
     private const int MaxChunksPerRequest = 64;
-    private static readonly TimeSpan MoveBroadcastInterval = TimeSpan.FromMilliseconds(100);
 
     private sealed class Client
     {
@@ -31,17 +30,36 @@ public sealed class GameServer
     private readonly WorldStore _store;
     private readonly BlockRegistry _blocks;
     private readonly WorldGen _generator;
+    private readonly WorldClock _clock;
     private readonly Lock _worldLock = new();
     private readonly Lock _clientsLock = new();
     private readonly Dictionary<int, Client> _clients = new();
     private int _nextPlayerId = 1;
 
-    public GameServer(WorldStore store, BlockRegistry blocks, WorldGen generator)
+    public GameServer(WorldStore store, BlockRegistry blocks, WorldGen generator, WorldClock clock)
     {
         _store = store;
         _blocks = blocks;
         _generator = generator;
-        _ = Task.Run(BroadcastMovesLoop);
+        _clock = clock;
+        _clock.OnTick += HandleTick;
+        _clock.OnTimescaleChanged += BroadcastTimeSync;
+    }
+
+    /// <summary>Runs on the clock thread — the server's simulation heartbeat.</summary>
+    private void HandleTick(long worldTick)
+    {
+        if (worldTick % 2 == 0) BroadcastMoves();           // 10 Hz position relay
+        if (worldTick % 100 == 0)
+        {
+            BroadcastTimeSync();                             // drift guard
+            lock (_worldLock) _store.SetMeta("worldTime", worldTick.ToString());
+        }
+    }
+
+    private void BroadcastTimeSync()
+    {
+        Broadcast(Protocol.EncodeTimeSync(_clock.WorldTick, _clock.Timescale, Constants.DayLengthTicks));
     }
 
     public int PlayerCount
@@ -74,7 +92,16 @@ public sealed class GameServer
                 if (client is null)
                 {
                     if (Protocol.TypeOf(data) != Msg.Hello) continue; // must hello first
-                    client = OnJoin(ws, Protocol.DecodeJson<HelloPayload>(data).Name, ct, out sendTask);
+                    var hello = Protocol.DecodeJson<HelloPayload>(data);
+                    if (hello.ProtocolVersion != Protocol.Version)
+                    {
+                        await ws.CloseAsync(
+                            WebSocketCloseStatus.PolicyViolation,
+                            $"client outdated: protocol {hello.ProtocolVersion}, server requires {Protocol.Version} - update your client",
+                            ct);
+                        return;
+                    }
+                    client = OnJoin(ws, hello.Name, ct, out sendTask);
                 }
                 else
                 {
@@ -111,8 +138,10 @@ public sealed class GameServer
             Seed = _generator.Seed,
             Spawn = new SpawnPoint { X = client.X, Y = client.Y, Z = client.Z },
             Palette = [.. _blocks.Defs.Select(d => d.StringId)],
+            ProtocolVersion = Protocol.Version,
         };
         client.Outbox.Writer.TryWrite(Protocol.EncodeJson(Msg.Welcome, welcome));
+        client.Outbox.Writer.TryWrite(Protocol.EncodeTimeSync(_clock.WorldTick, _clock.Timescale, Constants.DayLengthTicks));
 
         lock (_clientsLock)
         {
@@ -198,19 +227,15 @@ public sealed class GameServer
         }
     }
 
-    private async Task BroadcastMovesLoop()
+    private void BroadcastMoves()
     {
-        using var timer = new PeriodicTimer(MoveBroadcastInterval);
-        while (await timer.WaitForNextTickAsync())
+        PlayerMove[] moves;
+        lock (_clientsLock)
         {
-            PlayerMove[] moves;
-            lock (_clientsLock)
-            {
-                if (_clients.Count == 0) continue;
-                moves = [.. _clients.Values.Select(c => new PlayerMove(
-                    (ushort)c.Id, (float)c.X, (float)c.Y, (float)c.Z, c.Yaw, c.Pitch))];
-            }
-            Broadcast(Protocol.EncodePlayerMoves(moves));
+            if (_clients.Count == 0) return;
+            moves = [.. _clients.Values.Select(c => new PlayerMove(
+                (ushort)c.Id, (float)c.X, (float)c.Y, (float)c.Z, c.Yaw, c.Pitch))];
         }
+        Broadcast(Protocol.EncodePlayerMoves(moves));
     }
 }

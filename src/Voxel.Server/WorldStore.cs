@@ -46,6 +46,26 @@ public sealed class WorldStore : IDisposable
         CheckMeta("palette", JsonSerializer.Serialize(blocks.Defs.Select(d => d.StringId)));
     }
 
+    /// <summary>Free-form meta read (unlike CheckMeta, no pinning semantics).</summary>
+    public string? GetMeta(string key)
+    {
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = "SELECT value FROM meta WHERE key = $key";
+        cmd.Parameters.AddWithValue("$key", key);
+        return cmd.ExecuteScalar() as string;
+    }
+
+    /// <summary>Free-form meta upsert (used for mutable values like the world clock).</summary>
+    public void SetMeta(string key, string value)
+    {
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = "INSERT INTO meta (key, value) VALUES ($key, $value) " +
+                          "ON CONFLICT(key) DO UPDATE SET value = $value";
+        cmd.Parameters.AddWithValue("$key", key);
+        cmd.Parameters.AddWithValue("$value", value);
+        cmd.ExecuteNonQuery();
+    }
+
     /// <summary>Stores the value on first open; on later opens, requires an exact match.</summary>
     private void CheckMeta(string key, string value)
     {

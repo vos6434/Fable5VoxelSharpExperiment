@@ -14,6 +14,7 @@ public abstract record ServerEvent
     public sealed record PlayerJoined(int Id, string Name) : ServerEvent;
     public sealed record PlayerLeft(int Id) : ServerEvent;
     public sealed record PlayerMoved(PlayerMove[] Moves) : ServerEvent;
+    public sealed record TimeSynced(long WorldTick, float Timescale, int DayLengthTicks) : ServerEvent;
     public sealed record Disconnected(string Reason) : ServerEvent;
 }
 
@@ -54,11 +55,18 @@ public sealed class Connection : IDisposable
         using var connectCts = new CancellationTokenSource(timeout);
         await ws.ConnectAsync(server, connectCts.Token);
         await ws.SendAsync(
-            Protocol.EncodeJson(Msg.Hello, new HelloPayload { Name = playerName }),
+            Protocol.EncodeJson(Msg.Hello, new HelloPayload { Name = playerName, ProtocolVersion = Protocol.Version }),
             WebSocketMessageType.Binary, endOfMessage: true, connectCts.Token);
 
-        byte[] first = await ReceiveMessage(ws, connectCts.Token)
-            ?? throw new InvalidOperationException("server closed during handshake");
+        byte[]? first = await ReceiveMessage(ws, connectCts.Token);
+        if (first is null)
+        {
+            // Version-mismatch rejections arrive as a close reason.
+            string reason = string.IsNullOrEmpty(ws.CloseStatusDescription)
+                ? "server closed during handshake"
+                : ws.CloseStatusDescription;
+            throw new InvalidOperationException(reason);
+        }
         if (Protocol.TypeOf(first) != Msg.Welcome)
         {
             throw new InvalidOperationException("protocol error: expected Welcome");
@@ -152,6 +160,12 @@ public sealed class Connection : IDisposable
             case Msg.PlayerMoves:
                 Events.Enqueue(new ServerEvent.PlayerMoved(Protocol.DecodePlayerMoves(message)));
                 break;
+            case Msg.TimeSync:
+            {
+                var (worldTick, timescale, dayLength) = Protocol.DecodeTimeSync(message);
+                Events.Enqueue(new ServerEvent.TimeSynced(worldTick, timescale, dayLength));
+                break;
+            }
             default:
                 break;
         }
