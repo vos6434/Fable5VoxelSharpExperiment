@@ -207,7 +207,8 @@ public sealed class GameServer
         {
             case Protocol.ItemAction.GlueMark:
             {
-                if (!IsGlueable(GetWorldBlock(use.X, use.Y, use.Z))) break;
+                ushort id = GetWorldBlock(use.X, use.Y, use.Z);
+                if (id != 0 && !IsGlueable(id)) break; // corner on air or glueable solid
                 var p = (use.X, use.Y, use.Z);
                 if (client.GlueCorner1 is null)
                     client.GlueCorner1 = p;

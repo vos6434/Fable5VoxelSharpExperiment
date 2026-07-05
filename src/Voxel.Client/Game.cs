@@ -144,14 +144,16 @@ public sealed class Game
             if (_camera.Captured)
             {
                 // Glue in hand: RMB sets corner 1 then corner 2 (WorldEdit-style
-                // box), Shift+RMB activates, LMB clears the selection.
+                // box), Ctrl+RMB sets a corner on the targeted air cell, Shift+RMB
+                // activates, LMB clears the selection.
                 if (_inventory.SelectedStack()?.Id == "glue")
                 {
                     bool shift = _keyboard.IsKeyPressed(Key.ShiftLeft) || _keyboard.IsKeyPressed(Key.ShiftRight);
+                    bool ctrl = _keyboard.IsKeyPressed(Key.ControlLeft) || _keyboard.IsKeyPressed(Key.ControlRight);
                     if (button == MouseButton.Right && shift)
                         _connection.SendUseItem(Protocol.ItemAction.GlueActivate, 0, 0, 0);
-                    else if (button == MouseButton.Right && Aim() is RaycastHit h)
-                        _connection.SendUseItem(Protocol.ItemAction.GlueMark, h.X, h.Y, h.Z);
+                    else if (button == MouseButton.Right && GlueCornerFromAim(ctrl) is { } corner)
+                        _connection.SendUseItem(Protocol.ItemAction.GlueMark, corner.X, corner.Y, corner.Z);
                     else if (button == MouseButton.Left)
                         _connection.SendUseItem(Protocol.ItemAction.GlueClear, 0, 0, 0);
                     return;
@@ -427,6 +429,35 @@ public sealed class Game
     {
         var (dx, dy, dz) = AimDirection();
         return Raycast.Cast(_camera.X, _camera.Y, _camera.Z, dx, dy, dz, Reach, IsTargetable);
+    }
+
+    /// <summary>WorldEdit corner: solid under crosshair, or adjacent air cell when ctrl is held.</summary>
+    private (int X, int Y, int Z)? GlueCornerFromAim(bool allowAir)
+    {
+        if (Aim() is not RaycastHit hit) return null;
+        if (allowAir)
+        {
+            int ax = hit.X + hit.Nx, ay = hit.Y + hit.Ny, az = hit.Z + hit.Nz;
+            if (_world.GetBlock(ax, ay, az) != 0) return null;
+            return (ax, ay, az);
+        }
+        if (_world.GetBlock(hit.X, hit.Y, hit.Z) is ushort id && id != 0
+            && _data.Blocks.Get(id).Collision != Collision.Liquid)
+            return (hit.X, hit.Y, hit.Z);
+        return null;
+    }
+
+    private (int X, int Y, int Z)? GluePreviewCorner()
+    {
+        if (_target is not RaycastHit hit) return null;
+        bool ctrl = _keyboard.IsKeyPressed(Key.ControlLeft) || _keyboard.IsKeyPressed(Key.ControlRight);
+        if (ctrl)
+        {
+            int ax = hit.X + hit.Nx, ay = hit.Y + hit.Ny, az = hit.Z + hit.Nz;
+            if (_world.GetBlock(ax, ay, az) != 0) return null;
+            return (ax, ay, az);
+        }
+        return (hit.X, hit.Y, hit.Z);
     }
 
     private void BreakTargeted()
@@ -729,7 +760,7 @@ public sealed class Game
         // Glue box selection: two corners + live preview wireframe.
         if (_glueCorner1 is { } c1)
         {
-            var c2 = _glueCorner2 ?? (_target is RaycastHit t ? ((int X, int Y, int Z)?)(t.X, t.Y, t.Z) : null);
+            var c2 = _glueCorner2 ?? GluePreviewCorner();
             if (c2 is { } c2v)
             {
                 _gl.Disable(EnableCap.CullFace);
