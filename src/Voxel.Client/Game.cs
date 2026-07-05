@@ -71,6 +71,8 @@ public sealed class Game
     private EntityRenderer _entities = null!;
     private (int X, int Y, int Z)? _glueCorner1;
     private (int X, int Y, int Z)? _glueCorner2;
+    private uint _gunHoldEntityId;
+    private int _gunHoldDistanceCenti = 400; // 4 blocks default
     private static readonly float[] IdentityMat = Mat4.Identity();
 
     private Settings _settings = null!;
@@ -154,6 +156,19 @@ public sealed class Game
                         _connection.SendUseItem(Protocol.ItemAction.GlueClear, 0, 0, 0);
                     return;
                 }
+                if (_inventory.SelectedStack()?.Id == "physics_gun")
+                {
+                    if (button == MouseButton.Right)
+                    {
+                        if (_gunHoldEntityId == 0)
+                            _connection.SendUseItem(Protocol.ItemAction.GunGrab, 0, 0, 0);
+                        else
+                            _connection.SendUseItem(Protocol.ItemAction.GunRelease, 0, 0, 0);
+                    }
+                    else if (button == MouseButton.Left && _gunHoldEntityId != 0)
+                        _connection.SendUseItem(Protocol.ItemAction.GunThrow, 0, 0, 0);
+                    return;
+                }
                 if (button == MouseButton.Left) BreakTargeted();
                 else if (button == MouseButton.Right) PlaceAtTarget();
                 return;
@@ -166,8 +181,15 @@ public sealed class Game
         mouse.Scroll += (_, wheel) =>
         {
             if (!_camera.Captured) return;
-            int dir = wheel.Y < 0 ? 1 : -1;
-            _inventory.Selected = (_inventory.Selected + dir + 10) % 10;
+            if (_inventory.SelectedStack()?.Id == "physics_gun" && _gunHoldEntityId != 0)
+            {
+                int dir = wheel.Y < 0 ? -50 : 50; // 0.5 block steps
+                _gunHoldDistanceCenti = Math.Clamp(_gunHoldDistanceCenti + dir, 200, 800);
+                _connection.SendUseItem(Protocol.ItemAction.GunSetDistance, 0, 0, _gunHoldDistanceCenti);
+                return;
+            }
+            int hotbarDir = wheel.Y < 0 ? 1 : -1;
+            _inventory.Selected = (_inventory.Selected + hotbarDir + 10) % 10;
             _inventory.Save();
         };
         _keyboard.KeyDown += (_, key, _) =>
@@ -465,6 +487,10 @@ public sealed class Game
             {
                 _glueCorner1 = glue.Corner1;
                 _glueCorner2 = glue.Corner2;
+            }
+            else if (evt is ServerEvent.GunHoldUpdated gun)
+            {
+                _gunHoldEntityId = gun.EntityId;
             }
         }
 

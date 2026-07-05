@@ -31,6 +31,8 @@ public sealed class GameServer
         /// <summary>WorldEdit-style box selection corners for the next contraption (plan 03 M3).</summary>
         public (int X, int Y, int Z)? GlueCorner1;
         public (int X, int Y, int Z)? GlueCorner2;
+        /// <summary>Contraption held by the physics gun (0 = none).</summary>
+        public uint GunHoldEntityId;
     }
 
     private readonly WorldStore _store;
@@ -65,6 +67,17 @@ public sealed class GameServer
         _physics.SetTerrainSource(
             (cx, cy, cz) => { lock (_worldLock) return (ushort[])_store.Load(cx, cy, cz).Blocks.Clone(); },
             collides);
+        _physics.OnGrabReleased = clientId =>
+        {
+            lock (_clientsLock)
+            {
+                if (_clients.TryGetValue(clientId, out var c))
+                {
+                    c.GunHoldEntityId = 0;
+                    c.Outbox.Writer.TryWrite(Protocol.EncodeGunHold(0));
+                }
+            }
+        };
     }
 
     /// <summary>Runs on the clock thread — the server's simulation heartbeat.</summary>
@@ -73,6 +86,7 @@ public sealed class GameServer
         // Physics + entity mutations happen only here (Bepu isn't thread-safe);
         // console/network requests enqueue actions the tick thread drains.
         while (_tickActions.TryDequeue(out var action)) action();
+        UpdateGunGrabs();
         _physics.Step((float)ClockCore.TickSeconds);
 
         if (worldTick % 2 == 0)                              // 10 Hz relay
@@ -192,6 +206,57 @@ public sealed class GameServer
                 SyncGlueSelection(client);
                 _tickActions.Enqueue(() => ActivateContraption(marks));
                 break;
+            }
+            case Protocol.ItemAction.GunGrab:
+                _tickActions.Enqueue(() => TryGunGrab(client));
+                break;
+            case Protocol.ItemAction.GunRelease:
+                _tickActions.Enqueue(() => GunRelease(client, throwImpulse: false));
+                break;
+            case Protocol.ItemAction.GunThrow:
+                _tickActions.Enqueue(() => GunRelease(client, throwImpulse: true));
+                break;
+            case Protocol.ItemAction.GunSetDistance:
+                _tickActions.Enqueue(() => _physics.SetGrabDistance(client.Id, use.Z / 100f));
+                break;
+        }
+    }
+
+    // ---- Physics gun (plan 03 M4) -----------------------------------------------
+
+    private static void ClientLook(Client client, out Vector3 eye, out Vector3 rayDir)
+    {
+        eye = new Vector3((float)client.X, (float)client.Y, (float)client.Z);
+        float cy = MathF.Cos(client.Yaw), sy = MathF.Sin(client.Yaw);
+        float cp = MathF.Cos(client.Pitch), sp = MathF.Sin(client.Pitch);
+        rayDir = Vector3.Normalize(new Vector3(-sy * cp, sp, -cy * cp));
+    }
+
+    private void TryGunGrab(Client client)
+    {
+        ClientLook(client, out var eye, out var rayDir);
+        if (!_physics.TryGrab(client.Id, eye, rayDir, out uint entityId)) return;
+        client.GunHoldEntityId = entityId;
+        client.Outbox.Writer.TryWrite(Protocol.EncodeGunHold(entityId));
+    }
+
+    private void GunRelease(Client client, bool throwImpulse)
+    {
+        ClientLook(client, out _, out var rayDir);
+        if (!_physics.ReleaseGrab(client.Id, throwImpulse, rayDir)) return;
+        client.GunHoldEntityId = 0;
+        client.Outbox.Writer.TryWrite(Protocol.EncodeGunHold(0));
+    }
+
+    private void UpdateGunGrabs()
+    {
+        lock (_clientsLock)
+        {
+            foreach (var client in _clients.Values)
+            {
+                if (client.GunHoldEntityId == 0) continue;
+                ClientLook(client, out var eye, out var rayDir);
+                _physics.UpdateGrab(client.Id, eye, rayDir);
             }
         }
     }
@@ -372,6 +437,7 @@ public sealed class GameServer
 
     private void OnLeave(Client client)
     {
+        _tickActions.Enqueue(() => _physics.ReleaseAllGrabsForClient(client.Id));
         lock (_clientsLock)
         {
             if (!_clients.Remove(client.Id)) return;

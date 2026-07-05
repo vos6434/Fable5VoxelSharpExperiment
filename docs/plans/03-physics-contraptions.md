@@ -142,6 +142,12 @@ and throws them. Server-authoritative, multiplayer-correct.
    source blocks gone. 61 tests.
 4. **Physics gun** — grab/carry/scroll/throw with the servo constraint;
    two players fighting over one crate resolves cleanly (single holder).
+   **DONE (2026-07-06).** Protocol v6: `GunGrab` / `GunRelease` / `GunThrow` /
+   `GunSetDistance` on `UseItem`, `GunHold` sync to holder. Server Bepu
+   raycast (6-block reach) → `OneBodyLinearServo` + angular servo (Grabber
+   pattern); hold distance 2–8 blocks (scroll while holding); throw impulse
+   on LMB; one holder per entity enforced. Client: `physics_gun` in hand →
+   RMB grab/gentle release, LMB throw, scroll adjusts distance. 64 tests.
 5. **Persistence + migration runner** — formatVersion-keyed migrations
    (v1→v2 creates `entities`); contraptions survive restart, wake on
    interaction.

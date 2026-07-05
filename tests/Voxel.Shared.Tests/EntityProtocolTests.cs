@@ -84,4 +84,26 @@ public class EntityProtocolTests
         Assert.Equal(Msg.GlueMarks, Protocol.TypeOf(encoded));
         Assert.Equal(marks, Protocol.DecodeGlueMarks(encoded));
     }
+
+    [Fact]
+    public void GunHold_round_trips()
+    {
+        byte[] encoded = Protocol.EncodeGunHold(99);
+        Assert.Equal(Msg.GunHold, Protocol.TypeOf(encoded));
+        Assert.Equal(99u, Protocol.DecodeGunHold(encoded));
+
+        byte[] cleared = Protocol.EncodeGunHold(0);
+        Assert.Equal(0u, Protocol.DecodeGunHold(cleared));
+    }
+
+    [Fact]
+    public void UseItem_gun_actions_round_trip()
+    {
+        byte[] grab = Protocol.EncodeUseItem(Protocol.ItemAction.GunGrab, 0, 0, 0);
+        Assert.Equal(Protocol.ItemAction.GunGrab, Protocol.DecodeUseItem(grab).Action);
+
+        byte[] dist = Protocol.EncodeUseItem(Protocol.ItemAction.GunSetDistance, 0, 0, 650);
+        var (_, _, _, z) = Protocol.DecodeUseItem(dist);
+        Assert.Equal(650, z);
+    }
 }

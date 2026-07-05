@@ -17,7 +17,7 @@ namespace Voxel.Server;
 /// body maps to a PhysicsEntity that the game server spawns/streams/despawns
 /// over the wire.
 /// </summary>
-public sealed class PhysicsWorld : IDisposable
+public sealed partial class PhysicsWorld : IDisposable
 {
     public sealed class Entity
     {
@@ -96,6 +96,7 @@ public sealed class PhysicsWorld : IDisposable
             Pivot = new Vector3(0.5f, 0.5f, 0.5f),
         };
         _entities[entity.Id] = entity;
+        TrackBody(entity);
         return entity;
     }
 
@@ -150,12 +151,18 @@ public sealed class PhysicsWorld : IDisposable
             Pivot = center,
         };
         _entities[entity.Id] = entity;
+        TrackBody(entity);
         return entity;
     }
 
     public void Remove(uint id)
     {
-        if (_entities.Remove(id, out var e)) _sim.Bodies.Remove(e.Body);
+        if (_entities.Remove(id, out var e))
+        {
+            ReleaseGrabsOnEntity(id);
+            UntrackBody(e);
+            _sim.Bodies.Remove(e.Body);
+        }
     }
 
     /// <summary>Advances the simulation by one tick's worth of time.</summary>

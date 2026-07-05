@@ -18,7 +18,7 @@ public enum Msg : byte
     Move = 3,         // f64 x,y,z, f32 yaw, f32 pitch
     SetBlock = 4,     // i32 x,y,z, u16 blockId (0 = break)
     TimeControl = 5,  // i64 setTick (-1 = no change), f32 timescale (<0 = no change)
-    UseItem = 6,      // u8 action (0=glue corner, 1=glue activate, 2=glue clear), i32 x,y,z
+    UseItem = 6,      // u8 action, i32 x,y,z (block coords or gun hold distance in centi-blocks)
     // server → client
     Welcome = 10,     // JSON { playerId, seed, spawn, palette, protocolVersion }
     ChunkData = 11,   // i32 cx,cy,cz, u8 empty, [deflate-raw u16 LE blocks]
@@ -32,6 +32,7 @@ public enum Msg : byte
     EntityState = 18,   // u16 count, count x (u32 id, f32 x,y,z, f32 qx,qy,qz,qw, f32 vx,vy,vz)
     EntityDespawn = 19, // u32 id, u8 becameBlocks
     GlueMarks = 20,     // u16 count (0–2), count x (i32 x,y,z) — selection corners 1..2
+    GunHold = 21,       // u32 entityId (0 = not holding) — physics gun grab sync
 }
 
 public sealed class WelcomePayload
@@ -87,9 +88,10 @@ public static class Protocol
     /// History: 1 = launch (implicit), 2 = version handshake + TimeSync,
     /// 3 = TimeControl (debug menu time slider / pause),
     /// 4 = physics entities (spawn/state/despawn),
-    /// 5 = UseItem + glue marks + EntitySpawn pivot (contraptions).
+    /// 5 = UseItem + glue marks + EntitySpawn pivot (contraptions),
+    /// 6 = physics gun (grab actions + GunHold sync).
     /// </summary>
-    public const int Version = 5;
+    public const int Version = 6;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -282,7 +284,13 @@ public static class Protocol
 
     // ---- UseItem / glue (plan 03 M3) ------------------------------------------
 
-    public enum ItemAction : byte { GlueMark = 0, GlueActivate = 1, GlueClear = 2 }
+    public enum ItemAction : byte
+    {
+        GlueMark = 0, GlueActivate = 1, GlueClear = 2,
+        GunGrab = 3, GunRelease = 4, GunThrow = 5,
+        /// <summary>z = hold distance in centi-blocks (200–800 → 2.0–8.0 blocks).</summary>
+        GunSetDistance = 6,
+    }
 
     /// <summary>Sync the marking player's box selection (0, 1, or 2 corners).</summary>
     public static byte[] EncodeGlueSelection((int X, int Y, int Z)? corner1, (int X, int Y, int Z)? corner2)
@@ -302,6 +310,17 @@ public static class Protocol
             _ => (marks[0], marks[1]),
         };
     }
+
+    public static byte[] EncodeGunHold(uint entityId)
+    {
+        var outBuf = new byte[5];
+        outBuf[0] = (byte)Msg.GunHold;
+        BinaryPrimitives.WriteUInt32LittleEndian(outBuf.AsSpan(1), entityId);
+        return outBuf;
+    }
+
+    public static uint DecodeGunHold(ReadOnlySpan<byte> message)
+        => BinaryPrimitives.ReadUInt32LittleEndian(message[1..]);
 
     public static byte[] EncodeUseItem(ItemAction action, int x, int y, int z)
     {

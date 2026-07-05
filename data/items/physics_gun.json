@@ -1,0 +1,6 @@
+{
+  "id": "physics_gun",
+  "name": "Physics Gun",
+  "icon": "physics_gun_icon.png",
+  "maxStack": 1
+}

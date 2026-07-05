@@ -25,6 +25,7 @@ public abstract record ServerEvent
     public sealed record EntityStates(Protocol.EntityState[] States) : ServerEvent;
     public sealed record EntityDespawned(uint Id, bool BecameBlocks) : ServerEvent;
     public sealed record GlueSelectionUpdated((int X, int Y, int Z)? Corner1, (int X, int Y, int Z)? Corner2) : ServerEvent;
+    public sealed record GunHoldUpdated(uint EntityId) : ServerEvent;
     public sealed record Disconnected(string Reason) : ServerEvent;
 }
 
@@ -218,6 +219,9 @@ public sealed class Connection : IDisposable
                 Events.Enqueue(new ServerEvent.GlueSelectionUpdated(c1, c2));
                 break;
             }
+            case Msg.GunHold:
+                Events.Enqueue(new ServerEvent.GunHoldUpdated(Protocol.DecodeGunHold(message)));
+                break;
             default:
                 break;
         }
