@@ -7,7 +7,7 @@ same discipline used for the original build and the port).
 | # | Plan | Size | Depends on |
 |---|------|------|------------|
 | 1 | [Tick system & timescale](01-tick-system.md) | S | — |
-| 2 | [Colored lighting, shadows, day/night](02-lighting-shadows-day-night.md) | L | 1 (time of day) |
+| 2 | [Colored lighting, shadows, day/night](02-lighting-shadows-day-night.md) | XL | 1 (time of day) |
 | 3 | [Physics contraptions, glue & physics gun](03-physics-contraptions.md) | XL | 1 (simulation step) |
 | 4 | [Chunk & contraption LOD](04-lod.md) | L | 3 (contraption half) |
 | 5 | [Minimap & world map](05-maps.md) | M | 3 (contraption markers) |
@@ -37,10 +37,11 @@ same discipline used for the original build and the port).
 
 - Physics: **BepuPhysics v2** (pure C#, compound colliders, constraints)
 - Ticks: **20 TPS fixed + adjustable timescale** (pause / step / speed)
-- Lighting: **real-time sun shadows** — CSM baseline, texel-snapped for the
-  pixelated look; timeboxed voxel-raymarch (SDF-style) spike as an upgrade;
-  VSM rejected (soft edges fight the aesthetic). Voxel **RGB colored block
-  light** regardless.
+- Lighting: **voxel ray-traced shadows for ALL lights** (sun, moon, and
+  block lights — user upgraded the requirement 2026-07-05): DDA shadow rays
+  through a GPU occupancy bitmap, clustered block lights with a shadowed-
+  lights cap per cluster. Perf-gated; fallback tier = CSM sun + flood-fill
+  block light. VSM rejected.
 - Day length: **20 minutes** default, server-configurable
 - Map: **omniscient** (shows everything the server has generated)
 - LOD reach: **~32 chunks (512 blocks)** via two LOD rings
