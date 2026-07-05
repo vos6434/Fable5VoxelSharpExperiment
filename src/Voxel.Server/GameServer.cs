@@ -202,6 +202,16 @@ public sealed class GameServer
                 Broadcast(Protocol.EncodeBlockChange(Msg.BlockUpdate, edit.X, edit.Y, edit.Z, edit.BlockId));
                 break;
             }
+            case Msg.TimeControl:
+            {
+                // Debug menu: any client may scrub/pause world time (same trust
+                // model as block edits). Sentinels mean "leave unchanged".
+                var (setTick, timescale) = Protocol.DecodeTimeControl(data);
+                if (setTick >= 0) _clock.SetWorldTick(setTick);
+                if (timescale >= 0) _clock.SetTimescale(timescale); // fires its own TimeSync
+                else BroadcastTimeSync();
+                break;
+            }
             default:
                 break;
         }

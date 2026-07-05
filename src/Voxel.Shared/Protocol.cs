@@ -17,6 +17,7 @@ public enum Msg : byte
     ChunkRequest = 2, // u16 count, count x (i32 cx, i32 cy, i32 cz)
     Move = 3,         // f64 x,y,z, f32 yaw, f32 pitch
     SetBlock = 4,     // i32 x,y,z, u16 blockId (0 = break)
+    TimeControl = 5,  // i64 setTick (-1 = no change), f32 timescale (<0 = no change)
     // server → client
     Welcome = 10,     // JSON { playerId, seed, spawn, palette, protocolVersion }
     ChunkData = 11,   // i32 cx,cy,cz, u8 empty, [deflate-raw u16 LE blocks]
@@ -77,9 +78,10 @@ public static class Protocol
     /// <summary>
     /// Bumped on every wire-format change. Mismatched clients are rejected at
     /// Hello with a clear close reason instead of decoding garbage.
-    /// History: 1 = launch (implicit), 2 = version handshake + TimeSync.
+    /// History: 1 = launch (implicit), 2 = version handshake + TimeSync,
+    /// 3 = TimeControl (debug menu time slider / pause).
     /// </summary>
-    public const int Version = 2;
+    public const int Version = 3;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -229,6 +231,24 @@ public static class Protocol
             BinaryPrimitives.ReadInt64LittleEndian(message[1..]),
             BinaryPrimitives.ReadSingleLittleEndian(message[9..]),
             BinaryPrimitives.ReadInt32LittleEndian(message[13..]));
+    }
+
+    // ---- TimeControl (client → server: debug menu) ------------------------------
+
+    public static byte[] EncodeTimeControl(long setTick, float timescale)
+    {
+        var outBuf = new byte[13];
+        outBuf[0] = (byte)Msg.TimeControl;
+        BinaryPrimitives.WriteInt64LittleEndian(outBuf.AsSpan(1), setTick);
+        BinaryPrimitives.WriteSingleLittleEndian(outBuf.AsSpan(9), timescale);
+        return outBuf;
+    }
+
+    public static (long SetTick, float Timescale) DecodeTimeControl(ReadOnlySpan<byte> message)
+    {
+        return (
+            BinaryPrimitives.ReadInt64LittleEndian(message[1..]),
+            BinaryPrimitives.ReadSingleLittleEndian(message[9..]));
     }
 
     // ---- PlayerMoves ----------------------------------------------------------

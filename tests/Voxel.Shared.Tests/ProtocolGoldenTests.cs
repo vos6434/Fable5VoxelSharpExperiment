@@ -55,6 +55,18 @@ public class ProtocolGoldenTests
     }
 
     [Fact]
+    public void TimeControl_round_trips()
+    {
+        byte[] encoded = Protocol.EncodeTimeControl(123456789L, 2.5f);
+        Assert.Equal(Msg.TimeControl, Protocol.TypeOf(encoded));
+        Assert.Equal(13, encoded.Length);
+        Assert.Equal((123456789L, 2.5f), Protocol.DecodeTimeControl(encoded));
+
+        // Sentinels: -1 tick = no change, negative timescale = no change.
+        Assert.Equal((-1L, -1f), Protocol.DecodeTimeControl(Protocol.EncodeTimeControl(-1, -1f)));
+    }
+
+    [Fact]
     public void Json_messages_round_trip()
     {
         var welcome = new WelcomePayload

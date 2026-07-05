@@ -140,6 +140,12 @@ public sealed class WorldClock : IDisposable
         lock (_lock) Core.RequestSteps(n);
     }
 
+    /// <summary>Jumps the world clock to an absolute tick (debug menu time slider).</summary>
+    public void SetWorldTick(long tick)
+    {
+        lock (_lock) Core.WorldTick = Math.Max(0, tick);
+    }
+
     private void RunLoop()
     {
         var stopwatch = Stopwatch.StartNew();

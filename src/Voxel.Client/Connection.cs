@@ -95,6 +95,10 @@ public sealed class Connection : IDisposable
     public void SendSetBlock(int x, int y, int z, ushort blockId) =>
         _outbox.Writer.TryWrite(Protocol.EncodeBlockChange(Msg.SetBlock, x, y, z, blockId));
 
+    /// <summary>Debug menu: scrub world time and/or set timescale (-1 = leave unchanged).</summary>
+    public void SendTimeControl(long setTick, float timescale) =>
+        _outbox.Writer.TryWrite(Protocol.EncodeTimeControl(setTick, timescale));
+
     private async Task SendLoop(CancellationToken ct)
     {
         try

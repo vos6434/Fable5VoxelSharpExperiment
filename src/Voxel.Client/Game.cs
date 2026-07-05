@@ -23,6 +23,8 @@ public sealed record GameOptions
     public bool DemoGui { get; init; }
     /// <summary>Verification hook: show the pause menu.</summary>
     public bool DemoPause { get; init; }
+    /// <summary>Verification hook: open the debug menu (time slider).</summary>
+    public bool DemoDebug { get; init; }
     /// <summary>Verification hook: pin the day/night clock to a fixed tick.</summary>
     public long? ForceTimeTicks { get; init; }
 }
@@ -82,6 +84,8 @@ public sealed class Game
     private int _fpsFrames;
     private int _lastFps;
     private double _moveSendTimer;
+    private long? _pendingTimeTick;    // debug slider: latest scrub not yet sent
+    private float _timeControlCooldown;
     private readonly float[] _frustumPlanes = new float[24];
 
     public Game(GameOptions options)
@@ -180,6 +184,18 @@ public sealed class Game
                         _gui.ShowPause();
                     }
                     return;
+                case Key.F3:
+                    if (_gui.DebugVisible)
+                    {
+                        _gui.HideDebug();
+                        if (!_gui.AnyOpen && !_gui.PauseVisible) SetCaptured(true);
+                    }
+                    else
+                    {
+                        _gui.ShowDebug();
+                        SetCaptured(false);
+                    }
+                    return;
                 default:
                 {
                     int? slot = key switch
@@ -252,6 +268,32 @@ public sealed class Game
         _inventory = new PlayerInventory(_data.Blocks, _data.Items, _settings);
         _gui = new GuiSystem(_gl, _data, _inventory, _settings, Path.Combine(_options.RepoRoot, "data"));
         _gui.OnResume = () => SetCaptured(true);
+
+        // Debug menu: slider t (0..1) spans clock time 00:00..24:00; ticks are
+        // 06:00-anchored (day boundary = sunrise), hence the ±6h shifts.
+        _gui.DebugState = () =>
+        {
+            double ticks = Math.Max(0, _clock.WorldTicks);
+            double dayFraction = ticks % _clock.DayLengthTicks / _clock.DayLengthTicks;
+            float sliderT = (float)((dayFraction * 24 + 6) % 24 / 24);
+            return (sliderT, _clock.Describe(), _clock.Timescale == 0f);
+        };
+        _gui.OnDebugTime = t =>
+        {
+            long day = (long)(Math.Max(0, _clock.WorldTicks) / _clock.DayLengthTicks);
+            double dayFraction = ((t * 24 - 6) + 24) % 24 / 24;
+            long tick = day * _clock.DayLengthTicks + (long)(dayFraction * _clock.DayLengthTicks);
+            _clock.OnSync(tick, _clock.Timescale, _clock.DayLengthTicks); // instant local feedback
+            _pendingTimeTick = tick; // sent to the server throttled (OnUpdate)
+        };
+        _gui.OnDebugPause = paused =>
+        {
+            // Resume always returns to x1 (an explicit rate is still available
+            // via the server's "tick rate" console command).
+            float scale = paused ? 0f : 1f;
+            _clock.OnSync((long)Math.Max(0, _clock.WorldTicks), scale, _clock.DayLengthTicks);
+            _connection.SendTimeControl(-1, scale);
+        };
         _gui.SetScreenSize(_window.FramebufferSize.X, _window.FramebufferSize.Y);
         _window.FramebufferResize += size => _gui.SetScreenSize(size.X, size.Y);
         var uiShader = new GlShader(
@@ -358,6 +400,16 @@ public sealed class Game
             _connection.SendMove(_camera.X, _camera.Y, _camera.Z, _camera.Yaw, _camera.Pitch);
         }
 
+        // Debug time slider: scrubbing updates the local clock every frame but
+        // sends to the server at most 10x/s; the last value always goes out.
+        _timeControlCooldown -= (float)dt;
+        if (_pendingTimeTick is long pendingTick && _timeControlCooldown <= 0)
+        {
+            _connection.SendTimeControl(pendingTick, -1f);
+            _pendingTimeTick = null;
+            _timeControlCooldown = 0.1f;
+        }
+
         _gui.SetCtrlHeld(_keyboard.IsKeyPressed(Key.ControlLeft) || _keyboard.IsKeyPressed(Key.ControlRight));
 
         // Verification hooks.
@@ -373,6 +425,26 @@ public sealed class Game
         {
             _gui.ShowPause();
             _gui.OnMouseMove(_window.FramebufferSize.X * 0.5f, _window.FramebufferSize.Y * 0.42f);
+        }
+        if (_options.DemoDebug && _frameCount == 240)
+        {
+            _gui.ShowDebug();
+            SetCaptured(false);
+        }
+        if (_options.DemoDebug && _frameCount == 300)
+        {
+            // Click the slider at its midpoint (= 12:00) through the real input
+            // path, exercising hit-testing, clock math, and the server round trip.
+            float sliderMidX = _window.FramebufferSize.X - 12 - 380 + 16 + (380 - 32) / 2f;
+            _gui.OnMouseDown(sliderMidX, 12 + 78, 0);
+            _gui.OnMouseUp();
+        }
+        if (_options.DemoDebug && _frameCount == 330)
+        {
+            // Then click the pause button; the HUD should show "(paused)".
+            float centerX = _window.FramebufferSize.X - 12 - 380 + 190;
+            _gui.OnMouseDown(centerX, 12 + 116 + 18, 0);
+            _gui.OnMouseUp();
         }
         if (_options.DemoEdits && _frameCount == 240)
         {

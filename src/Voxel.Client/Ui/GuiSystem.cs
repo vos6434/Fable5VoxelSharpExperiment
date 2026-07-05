@@ -45,13 +45,23 @@ public sealed class GuiSystem : IDisposable
     private readonly string _dataRoot;
 
     public bool PauseVisible { get; private set; }
-    public bool AnyOpen => _openOrder.Count > 0;
+    public bool DebugVisible { get; private set; }
+    public bool AnyOpen => _openOrder.Count > 0 || DebugVisible;
     public bool HotbarUnlocked { get; private set; }
 
     // Pause menu callbacks (wired by Game).
     public Action? OnResume;
 
+    // Debug menu wiring (set by Game). SliderT maps clock time 00:00..24:00
+    // onto 0..1; Game owns the tick math so the 06:00-anchored day convention
+    // lives in one place.
+    public Func<(float SliderT, string TimeText, bool Paused)>? DebugState;
+    public Action<float>? OnDebugTime;
+    public Action<bool>? OnDebugPause;
+
     private (string Target, float OffX, float OffY)? _drag; // target = gui id or "hotbar"
+    private bool _debugSliderDrag;
+    private float _debugDragT;
     private bool _ctrlHeld;
     private float _mouseX, _mouseY;
     private int _screenW = 1280, _screenH = 720;
@@ -171,8 +181,10 @@ public sealed class GuiSystem : IDisposable
 
     public bool CloseAll()
     {
-        if (_openOrder.Count == 0) return false;
+        if (_openOrder.Count == 0 && !DebugVisible) return false;
         _openOrder.Clear();
+        DebugVisible = false;
+        _debugSliderDrag = false;
         _drag = null;
         return true;
     }
@@ -180,6 +192,14 @@ public sealed class GuiSystem : IDisposable
     public void ShowPause() => PauseVisible = true;
 
     public void HidePause() => PauseVisible = false;
+
+    public void ShowDebug() => DebugVisible = true;
+
+    public void HideDebug()
+    {
+        DebugVisible = false;
+        _debugSliderDrag = false;
+    }
 
     public void SetCtrlHeld(bool held) => _ctrlHeld = held;
 
@@ -245,6 +265,7 @@ public sealed class GuiSystem : IDisposable
     {
         _mouseX = x;
         _mouseY = y;
+        if (_debugSliderDrag) ApplyDebugSlider(x);
         if (_drag is { } d)
         {
             var (target, offX, offY) = d;
@@ -265,6 +286,7 @@ public sealed class GuiSystem : IDisposable
 
     public void OnMouseUp()
     {
+        _debugSliderDrag = false;
         if (_drag is not null)
         {
             _drag = null;
@@ -276,6 +298,12 @@ public sealed class GuiSystem : IDisposable
     public bool OnMouseDown(float x, float y, int button)
     {
         if (PauseVisible) return HandlePauseClick(x, y);
+
+        if (DebugVisible)
+        {
+            var (px, py, pw, ph) = DebugPanel();
+            if (Inside(x, y, px, py, pw, ph)) return HandleDebugClick(x, y);
+        }
 
         // Windows, topmost first.
         for (int i = _openOrder.Count - 1; i >= 0; i--)
@@ -367,6 +395,80 @@ public sealed class GuiSystem : IDisposable
     private static bool Inside(float px, float py, float x, float y, float w, float h) =>
         px >= x && px < x + w && py >= y && py < y + h;
 
+    // ---- debug menu -------------------------------------------------------------
+
+    private (float X, float Y, float W, float H) DebugPanel()
+    {
+        const float w = 380, h = 168;
+        return (Math.Max(0, _screenW - w - 12), 12, w, h);
+    }
+
+    private (float X, float Y, float W, float H) DebugSliderTrack()
+    {
+        var (px, py, pw, _) = DebugPanel();
+        return (px + 16, py + 78, pw - 32, 6);
+    }
+
+    private (float X, float Y, float W, float H) DebugPauseButton()
+    {
+        var (px, py, pw, _) = DebugPanel();
+        return (px + 16, py + 116, pw - 32, 36);
+    }
+
+    private bool HandleDebugClick(float x, float y)
+    {
+        var tr = DebugSliderTrack();
+        if (Inside(x, y, tr.X - 6, tr.Y - 12, tr.W + 12, tr.H + 24))
+        {
+            _debugSliderDrag = true;
+            ApplyDebugSlider(x);
+            return true;
+        }
+        var (bx, by, bw, bh) = DebugPauseButton();
+        if (Inside(x, y, bx, by, bw, bh))
+        {
+            bool paused = DebugState?.Invoke().Paused ?? false;
+            OnDebugPause?.Invoke(!paused);
+            return true;
+        }
+        return true; // clicks on the panel background are consumed
+    }
+
+    private void ApplyDebugSlider(float mouseX)
+    {
+        var tr = DebugSliderTrack();
+        _debugDragT = Math.Clamp((mouseX - tr.X) / tr.W, 0f, 1f);
+        OnDebugTime?.Invoke(_debugDragT);
+    }
+
+    private void DrawDebug(UiBatch batch, UiFont font)
+    {
+        var (px, py, pw, ph) = DebugPanel();
+        batch.SolidRect(px, py, pw, ph, 0.08f, 0.08f, 0.08f, 0.94f);
+        batch.BorderRect(px, py, pw, ph, 2, 0.35f, 0.35f, 0.35f, 1f);
+
+        var (sliderT, timeText, paused) = DebugState?.Invoke() ?? (0f, "time syncing...", false);
+        font.DrawShadowed(batch, px + 16, py + 10, "Debug (F3)");
+        font.DrawShadowed(batch, px + 16, py + 34, timeText);
+
+        // Time-of-day slider: 00:00 .. 24:00. While dragging, the handle
+        // follows the mouse instead of the (eased) clock state.
+        var tr = DebugSliderTrack();
+        batch.SolidRect(tr.X, tr.Y, tr.W, tr.H, 0.30f, 0.30f, 0.30f, 1f);
+        float t = _debugSliderDrag ? _debugDragT : sliderT;
+        batch.SolidRect(tr.X + t * tr.W - 5, tr.Y - 8, 10, tr.H + 16, 1f, 0.88f, 0.4f, 1f);
+        font.DrawShadowed(batch, tr.X, tr.Y + 14, "00:00");
+        font.DrawShadowed(batch, tr.X + (tr.W - font.Measure("12:00")) / 2, tr.Y + 14, "12:00");
+        font.DrawShadowed(batch, tr.X + tr.W - font.Measure("24:00"), tr.Y + 14, "24:00");
+
+        var (bx, by, bw, bh) = DebugPauseButton();
+        bool hover = Inside(_mouseX, _mouseY, bx, by, bw, bh) && !PauseVisible;
+        batch.SolidRect(bx, by, bw, bh, hover ? 0.5f : 0.42f, hover ? 0.5f : 0.42f, hover ? 0.5f : 0.42f, 1f);
+        batch.BorderRect(bx, by, bw, bh, 2, 0.62f, 0.62f, 0.62f, 1f);
+        string label = $"[{(paused ? "x" : " ")}] Pause time";
+        font.DrawShadowed(batch, bx + (bw - font.Measure(label)) / 2, by + (bh - font.LineHeight) / 2, label);
+    }
+
     // ---- pause menu -------------------------------------------------------------
 
     private (float X, float Y, float W, float H) PausePanel()
@@ -414,6 +516,8 @@ public sealed class GuiSystem : IDisposable
         {
             DrawWindow(batch, font, _assets[id]);
         }
+
+        if (DebugVisible) DrawDebug(batch, font);
 
         if (_inventory.Cursor is not null && !mouseCaptured)
         {
