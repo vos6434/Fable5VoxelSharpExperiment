@@ -94,11 +94,14 @@ float skyVisibility(vec3 startWorld, vec3 normal) {
     vec3 p = startWorld - uOccupancyOrigin + normal * 0.01;
     ivec3 voxel = ivec3(floor(p));
     int size = int(uOccupancySize);
-    // Outside the volume footprint is not "open sky" — the toroid wraps only
-    // inside the cube. Treating xz OOB as open caused blue skylight/fog
-    // speckle on cave walls near the region edge (and when the volume recenters).
-    if (voxel.x < 0 || voxel.z < 0 || voxel.x >= size || voxel.z >= size || voxel.y < 0) {
-        return 0.0;
+    // Below the region: underground, no sky.
+    if (voxel.y < 0) return 0.0;
+    // Horizontally outside (or above) the region: distant open terrain gets
+    // sky-only shading (plan 02), so treat it as open sky rather than unlit
+    // black. (Caves are essentially always inside the region, since you must
+    // be near them to see them.)
+    if (voxel.x < 0 || voxel.z < 0 || voxel.x >= size || voxel.z >= size || voxel.y >= size) {
+        return 1.0;
     }
     ivec3 wrapBase = ivec3(mod(uOccupancyOrigin, uOccupancySize) + 0.5);
     for (int i = 0; i < 96; i++) {

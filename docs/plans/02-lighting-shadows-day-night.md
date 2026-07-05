@@ -224,6 +224,15 @@ Three intertwined systems:
    merge only when AO matches. Corner samples that would cross two chunk
    boundaries read as air (pool ships face neighbors only) — invisible seam
    in practice.
+   **FIXED (2026-07-05, distant black terrain):** `skyVisibility` returned 0
+   for fragments horizontally outside the occupancy volume, so distant slopes
+   facing away from the sun (no direct light, no skylight) rendered near-black
+   — contradicting the plan's "sky-only shading beyond the region". Now
+   out-of-region (x/z outside, or above the volume top) returns open sky
+   (1.0); only genuinely-below-region (`y < 0`, deep underground) stays 0.
+   Caves are always inside the region (you must be near them to see them), so
+   they stay correctly dark. Verified: distant hilltops fully lit, caves/hell
+   still dark.
 7. **Night polish** — moon shadows, dusk grade, hell interplay (hell has no
    sun — ambient red floor).
    **DONE (2026-07-05).** `SkyState` now exposes the shadow-casting
