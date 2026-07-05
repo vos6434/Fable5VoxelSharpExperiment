@@ -151,6 +151,11 @@ and throws them. Server-authoritative, multiplayer-correct.
 5. **Persistence + migration runner** — formatVersion-keyed migrations
    (v1→v2 creates `entities`); contraptions survive restart, wake on
    interaction.
+   **DONE (2026-07-06).** `WorldMigrations` applies v1→v2 transactionally
+   (creates `entities` table); `SavedEntity` rows store deflated block grids
+   + pose/velocity/asleep. Saved on sleep transition + shutdown; loaded
+   asleep on boot; `EntityState` skips sleeping bodies (wake on grab/collision).
+   66 tests.
 6. **Caps & hardening** — 1,000-block cap UX, CCD for throws, contraption-
    vs-contraption stacking stress test (10× 100-block crates).
 7. **Disassemble** — snap-back-to-blocks flow.

@@ -160,6 +160,7 @@ _ = Task.Run(async () =>
 
 app.Lifetime.ApplicationStopping.Register(() =>
 {
+    gameServer.PersistAllEntities();
     clock.Dispose();
     store.SetMeta("worldTime", clock.WorldTick.ToString());
     store.Dispose(); // flush WAL cleanly on shutdown

@@ -78,6 +78,32 @@ public sealed class GameServer
                 }
             }
         };
+        LoadPersistedEntities();
+    }
+
+    /// <summary>Writes every live entity to disk (shutdown checkpoint).</summary>
+    public void PersistAllEntities()
+    {
+        lock (_worldLock)
+        {
+            foreach (var e in _physics.Entities.Values)
+                _store.SaveEntity(_physics.ToSavedEntity(e));
+        }
+    }
+
+    private void LoadPersistedEntities()
+    {
+        List<SavedEntity> saved;
+        lock (_worldLock) saved = _store.LoadEntities();
+        if (saved.Count == 0) return;
+
+        foreach (var snap in saved)
+        {
+            var entity = _physics.LoadEntity(snap);
+            var (pos, rot, _) = _physics.GetState(entity);
+            _spawnPayloads[entity.Id] = EncodeSpawn(entity, pos, rot);
+        }
+        Console.WriteLine($"[server] loaded {saved.Count} persisted entit{(saved.Count == 1 ? "y" : "ies")}");
     }
 
     /// <summary>Runs on the clock thread — the server's simulation heartbeat.</summary>
@@ -88,6 +114,7 @@ public sealed class GameServer
         while (_tickActions.TryDequeue(out var action)) action();
         UpdateGunGrabs();
         _physics.Step((float)ClockCore.TickSeconds);
+        PersistSleepTransitions();
 
         if (worldTick % 2 == 0)                              // 10 Hz relay
         {
@@ -313,6 +340,16 @@ public sealed class GameServer
         return entity;
     }
 
+    private void PersistSleepTransitions()
+    {
+        foreach (var entity in _physics.PollSleepTransitions())
+        {
+            lock (_worldLock) _store.SaveEntity(_physics.ToSavedEntity(entity));
+            var (pos, rot, _) = _physics.GetState(entity);
+            _spawnPayloads[entity.Id] = EncodeSpawn(entity, pos, rot);
+        }
+    }
+
     private void BroadcastEntityStates()
     {
         var entities = _physics.Entities;
@@ -320,10 +357,12 @@ public sealed class GameServer
         var states = new List<Protocol.EntityState>(entities.Count);
         foreach (var e in entities.Values)
         {
+            if (!_physics.IsAwake(e)) continue;
             var (pos, rot, vel) = _physics.GetState(e);
             states.Add(new Protocol.EntityState(
                 e.Id, pos.X, pos.Y, pos.Z, rot.X, rot.Y, rot.Z, rot.W, vel.X, vel.Y, vel.Z));
         }
+        if (states.Count == 0) return;
         Broadcast(Protocol.EncodeEntityStates(states));
     }
 

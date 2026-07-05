@@ -16,8 +16,6 @@ namespace Voxel.Server;
 /// </summary>
 public sealed class WorldStore : IDisposable
 {
-    private const int FormatVersion = 1;
-
     private readonly SqliteConnection _db;
     private readonly WorldGen _generator;
     private readonly Dictionary<(int, int, int), ChunkData> _cache = new();
@@ -39,7 +37,8 @@ public sealed class WorldStore : IDisposable
             ) WITHOUT ROWID;
             """);
 
-        CheckMeta("formatVersion", FormatVersion.ToString());
+        WorldMigrations.Run(_db);
+
         CheckMeta("generatorVersion", WorldGen.GeneratorVersion.ToString());
         CheckMeta("seed", generator.Seed.ToString());
         // Matches JSON.stringify(paletteArray) so worlds are portable across implementations.
@@ -136,6 +135,143 @@ public sealed class WorldStore : IDisposable
             cmd.CommandText = "SELECT COUNT(*) FROM chunks";
             return Convert.ToInt32(cmd.ExecuteScalar());
         }
+    }
+
+    public int EntityCount
+    {
+        get
+        {
+            using var cmd = _db.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM entities";
+            return Convert.ToInt32(cmd.ExecuteScalar());
+        }
+    }
+
+    // ---- Physics entities (plan 03 M5) ----------------------------------------
+
+    public void SaveEntity(SavedEntity e)
+    {
+        byte[] raw = new byte[e.Blocks.Length * 2];
+        Buffer.BlockCopy(e.Blocks, 0, raw, 0, raw.Length);
+        using var output = new MemoryStream();
+        using (var deflate = new DeflateStream(output, CompressionLevel.Fastest, leaveOpen: true))
+        {
+            deflate.Write(raw);
+        }
+
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO entities (
+              id, kind, dim_x, dim_y, dim_z, blocks,
+              pivot_x, pivot_y, pivot_z,
+              pos_x, pos_y, pos_z,
+              quat_x, quat_y, quat_z, quat_w,
+              vel_x, vel_y, vel_z,
+              ang_vel_x, ang_vel_y, ang_vel_z,
+              asleep
+            ) VALUES (
+              $id, $kind, $dimX, $dimY, $dimZ, $blocks,
+              $pivotX, $pivotY, $pivotZ,
+              $posX, $posY, $posZ,
+              $qx, $qy, $qz, $qw,
+              $vx, $vy, $vz,
+              $avx, $avy, $avz,
+              $asleep
+            )
+            ON CONFLICT(id) DO UPDATE SET
+              kind = $kind, dim_x = $dimX, dim_y = $dimY, dim_z = $dimZ, blocks = $blocks,
+              pivot_x = $pivotX, pivot_y = $pivotY, pivot_z = $pivotZ,
+              pos_x = $posX, pos_y = $posY, pos_z = $posZ,
+              quat_x = $qx, quat_y = $qy, quat_z = $qz, quat_w = $qw,
+              vel_x = $vx, vel_y = $vy, vel_z = $vz,
+              ang_vel_x = $avx, ang_vel_y = $avy, ang_vel_z = $avz,
+              asleep = $asleep
+            """;
+        cmd.Parameters.AddWithValue("$id", (long)e.Id);
+        cmd.Parameters.AddWithValue("$kind", e.Kind);
+        cmd.Parameters.AddWithValue("$dimX", e.DimX);
+        cmd.Parameters.AddWithValue("$dimY", e.DimY);
+        cmd.Parameters.AddWithValue("$dimZ", e.DimZ);
+        cmd.Parameters.AddWithValue("$blocks", output.ToArray());
+        cmd.Parameters.AddWithValue("$pivotX", e.PivotX);
+        cmd.Parameters.AddWithValue("$pivotY", e.PivotY);
+        cmd.Parameters.AddWithValue("$pivotZ", e.PivotZ);
+        cmd.Parameters.AddWithValue("$posX", e.PosX);
+        cmd.Parameters.AddWithValue("$posY", e.PosY);
+        cmd.Parameters.AddWithValue("$posZ", e.PosZ);
+        cmd.Parameters.AddWithValue("$qx", e.Qx);
+        cmd.Parameters.AddWithValue("$qy", e.Qy);
+        cmd.Parameters.AddWithValue("$qz", e.Qz);
+        cmd.Parameters.AddWithValue("$qw", e.Qw);
+        cmd.Parameters.AddWithValue("$vx", e.VelX);
+        cmd.Parameters.AddWithValue("$vy", e.VelY);
+        cmd.Parameters.AddWithValue("$vz", e.VelZ);
+        cmd.Parameters.AddWithValue("$avx", e.AngVelX);
+        cmd.Parameters.AddWithValue("$avy", e.AngVelY);
+        cmd.Parameters.AddWithValue("$avz", e.AngVelZ);
+        cmd.Parameters.AddWithValue("$asleep", e.Asleep ? 1 : 0);
+        cmd.ExecuteNonQuery();
+    }
+
+    public void DeleteEntity(uint id)
+    {
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = "DELETE FROM entities WHERE id = $id";
+        cmd.Parameters.AddWithValue("$id", (long)id);
+        cmd.ExecuteNonQuery();
+    }
+
+    public List<SavedEntity> LoadEntities()
+    {
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, kind, dim_x, dim_y, dim_z, blocks,
+                   pivot_x, pivot_y, pivot_z,
+                   pos_x, pos_y, pos_z,
+                   quat_x, quat_y, quat_z, quat_w,
+                   vel_x, vel_y, vel_z,
+                   ang_vel_x, ang_vel_y, ang_vel_z,
+                   asleep
+            FROM entities ORDER BY id
+            """;
+        var list = new List<SavedEntity>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            int volume = reader.GetInt32(2) * reader.GetInt32(3) * reader.GetInt32(4);
+            byte[] raw = InflateRaw((byte[])reader.GetValue(5));
+            if (raw.Length != volume * 2)
+            {
+                throw new InvalidDataException($"entity #{reader.GetInt64(0)}: bad blocks size {raw.Length}");
+            }
+            var blocks = new ushort[volume];
+            Buffer.BlockCopy(raw, 0, blocks, 0, raw.Length);
+            list.Add(new SavedEntity(
+                (uint)reader.GetInt64(0),
+                (byte)reader.GetInt32(1),
+                (ushort)reader.GetInt32(2),
+                (ushort)reader.GetInt32(3),
+                (ushort)reader.GetInt32(4),
+                blocks,
+                (float)reader.GetDouble(6),
+                (float)reader.GetDouble(7),
+                (float)reader.GetDouble(8),
+                reader.GetDouble(9),
+                reader.GetDouble(10),
+                reader.GetDouble(11),
+                (float)reader.GetDouble(12),
+                (float)reader.GetDouble(13),
+                (float)reader.GetDouble(14),
+                (float)reader.GetDouble(15),
+                (float)reader.GetDouble(16),
+                (float)reader.GetDouble(17),
+                (float)reader.GetDouble(18),
+                (float)reader.GetDouble(19),
+                (float)reader.GetDouble(20),
+                (float)reader.GetDouble(21),
+                reader.GetInt32(22) != 0));
+        }
+        return list;
     }
 
     /// <summary>Raw-deflate compression of the chunk's u16 LE block array (zlib deflateRaw compatible).</summary>
