@@ -225,9 +225,10 @@ void main() {
     if (texel.a < uAlphaTest) discard;
 
     // Emissive faces (glowstone, lava): fullbright, no lighting or shadows.
+    // Skip distance fog — mixing toward uFogColor (dark red in hell) made
+    // distant glowstone look washed out / extinguished.
     if (vMeta.y >= 3.99) {
-        float fogEm = smoothstep(uFogNear, uFogFar, vFogDepth);
-        outColor = vec4(mix(texel.rgb, uFogColor, fogEm), texel.a);
+        outColor = vec4(texel.rgb, texel.a);
         return;
     }
 
