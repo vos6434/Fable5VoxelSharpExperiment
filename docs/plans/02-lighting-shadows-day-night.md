@@ -67,7 +67,16 @@ Three intertwined systems:
   emitter scan, stored per voxel column) × time-of-day curve; vertex-baked
   voxel AO (corner darkening from occupancy) keeps unlit areas readable.
 - **Composite:** `albedo × (Σ shadowedBlockLights + skylight × skyColor(t) ×
-  sunRay + ambientFloor)`.
+  sunRay × max(N·L, 0) + ambientFloor)`.
+- **Surface normals (added 2026-07-05):** the original formula had no N·L
+  term, which made sun-averted faces fully lit and forced a large ray-origin
+  bias that ate contact shadows and leaked light. The chunk shader now
+  reconstructs the face normal from screen-space derivatives
+  (`cross(dFdx(worldPos), dFdy(worldPos))`, camera-oriented — exact and
+  constant on flat voxel faces, so the pixel look is preserved). Shadow rays
+  start 0.01 blocks along the normal (landing in the air voxel in front of
+  the face); fragments with N·L ≤ 0 skip the ray entirely. Block-light rays
+  (M5) should reuse the same normal and bias.
 
 ### C. Known limitations (v1, documented)
 
@@ -125,6 +134,14 @@ Three intertwined systems:
    (VSync-capped). CSM fallback NOT needed. Shadows verified rotating with
    the sun (morning/afternoon slopes flip). Two-level coarse DDA deferred as
    a future optimization — not required to hit the gate.
+   **FIXED (2026-07-05):** first version looked flat/wrong: no N·L term
+   (see composite note above), a 1.2-block sun-ward ray bias that erased
+   contact shadows and produced lit islands inside shadows, and the volume
+   was fully wiped and re-uploaded on every chunk crossing instead of the
+   planned toroidal remap (shadows blinked out while moving). All three
+   corrected: derivative normals + N·L + 0.01-block normal bias, and true
+   toroidal addressing (slab = chunk mod region; only the newly-entered rim
+   re-uploads). World pass now 1.2-1.65 ms — still under the 4 ms budget.
 4. **Emitters + clusters** — registry, cluster lists, unshadowed colored
    point lights (lightColor JSON live here).
 5. **Block-light shadow rays** — capped shadowed lights per cluster; the

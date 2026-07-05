@@ -6,8 +6,14 @@ namespace Voxel.Client;
 /// <summary>
 /// GPU occupancy of the world around the camera — one byte per voxel (255 =
 /// solid/opaque, 0 = passable) in an R8 3D texture. Shadow and light rays DDA
-/// through it (plan 02 M3+). Recentered on chunk crossings; chunks upload a
-/// few per frame; edits re-upload just the touched chunk.
+/// through it (plan 02 M3+). Chunks upload a few per frame; edits re-upload
+/// just the touched chunk.
+///
+/// Addressing is toroidal (per plan 02): world chunk c occupies texture slab
+/// c mod RegionChunks, so recentering on a chunk crossing keeps every chunk
+/// that is still in range in place — only the newly-entered rim is zeroed and
+/// re-uploaded, instead of wiping the whole volume. The shader mirrors this
+/// by fetching at (world voxel mod Size).
 ///
 /// Texture axes map directly to world XYZ. GL 3D data order is x-fastest then
 /// y then z, which differs from ChunkData's (x, z, y) order, so each chunk is
@@ -24,6 +30,7 @@ public sealed class OccupancyVolume : IDisposable
     private readonly byte[] _opaque;
     private readonly uint _texture;
     private readonly byte[] _scratch = new byte[S * S * S];
+    private readonly byte[] _zeroSlab = new byte[S * S * S];
     private readonly byte[] _zero = new byte[Size * Size * Size];
     private readonly (int Dx, int Dy, int Dz)[] _localChunks;
     private readonly HashSet<(int, int, int)> _uploaded = new();
@@ -81,13 +88,7 @@ public sealed class OccupancyVolume : IDisposable
             Coords.WorldToChunk(camY) - RegionRadiusChunks,
             Coords.WorldToChunk(camZ) - RegionRadiusChunks);
 
-        if (desired != _originChunk)
-        {
-            _originChunk = desired;
-            ClearTexture();
-            _uploaded.Clear();
-            _cursor = 0;
-        }
+        if (desired != _originChunk) Recenter(desired);
 
         // Edits: re-upload touched chunks that fall inside the region.
         world.DrainOccupancyDirty(_dirty);
@@ -104,13 +105,64 @@ public sealed class OccupancyVolume : IDisposable
             if (_uploaded.Contains(world_)) continue;
             var blocks = world.ChunkBlocks(world_.Item1, world_.Item2, world_.Item3);
             if (blocks is null) continue;
-            UploadChunk(dx, dy, dz, blocks);
+            UploadChunk(world_.Item1, world_.Item2, world_.Item3, blocks);
             _uploaded.Add(world_);
             uploaded++;
         }
     }
 
-    private unsafe void UploadChunk(int localCx, int localCy, int localCz, ushort[] blocks)
+    private void Recenter((int X, int Y, int Z) origin)
+    {
+        var old = _originChunk;
+        _originChunk = origin;
+        _cursor = 0; // restart the nearest-first scan around the new center
+
+        bool overlaps = old.X != int.MinValue
+            && Math.Abs(origin.X - old.X) < RegionChunks
+            && Math.Abs(origin.Y - old.Y) < RegionChunks
+            && Math.Abs(origin.Z - old.Z) < RegionChunks;
+        if (!overlaps)
+        {
+            // Teleport / first update: nothing carries over.
+            ClearTexture();
+            _uploaded.Clear();
+            return;
+        }
+
+        // Toroidal scroll: chunks still in range keep their slab. Drop the ones
+        // that scrolled out and zero the slabs of newly-entered coords (they
+        // alias the departed chunks' slabs) so stale occupancy can't shadow.
+        _uploaded.RemoveWhere(c =>
+            c.Item1 < origin.X || c.Item1 >= origin.X + RegionChunks ||
+            c.Item2 < origin.Y || c.Item2 >= origin.Y + RegionChunks ||
+            c.Item3 < origin.Z || c.Item3 >= origin.Z + RegionChunks);
+        for (int dx = 0; dx < RegionChunks; dx++)
+            for (int dy = 0; dy < RegionChunks; dy++)
+                for (int dz = 0; dz < RegionChunks; dz++)
+                {
+                    int cx = origin.X + dx, cy = origin.Y + dy, cz = origin.Z + dz;
+                    bool wasInside =
+                        cx >= old.X && cx < old.X + RegionChunks &&
+                        cy >= old.Y && cy < old.Y + RegionChunks &&
+                        cz >= old.Z && cz < old.Z + RegionChunks;
+                    if (!wasInside) ZeroSlab(cx, cy, cz);
+                }
+    }
+
+    private static int Mod(int v, int m) => (v % m + m) % m;
+
+    private unsafe void ZeroSlab(int cx, int cy, int cz)
+    {
+        _gl.BindTexture(TextureTarget.Texture3D, _texture);
+        fixed (byte* p = _zeroSlab)
+        {
+            _gl.TexSubImage3D(TextureTarget.Texture3D, 0,
+                Mod(cx, RegionChunks) * S, Mod(cy, RegionChunks) * S, Mod(cz, RegionChunks) * S,
+                S, S, S, PixelFormat.Red, PixelType.UnsignedByte, p);
+        }
+    }
+
+    private unsafe void UploadChunk(int cx, int cy, int cz, ushort[] blocks)
     {
         // Transpose ChunkData order (x fastest, then z, then y) into GL 3D order
         // (x fastest, then y, then z), writing occupancy per voxel.
@@ -123,8 +175,8 @@ public sealed class OccupancyVolume : IDisposable
         fixed (byte* p = _scratch)
         {
             _gl.TexSubImage3D(TextureTarget.Texture3D, 0,
-                localCx * S, localCy * S, localCz * S, S, S, S,
-                PixelFormat.Red, PixelType.UnsignedByte, p);
+                Mod(cx, RegionChunks) * S, Mod(cy, RegionChunks) * S, Mod(cz, RegionChunks) * S,
+                S, S, S, PixelFormat.Red, PixelType.UnsignedByte, p);
         }
     }
 
