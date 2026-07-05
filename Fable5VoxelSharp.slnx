@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/Voxel.Server/Voxel.Server.csproj" />
     <Project Path="src/Voxel.Shared/Voxel.Shared.csproj" />
   </Folder>
   <Folder Name="/tests/">
