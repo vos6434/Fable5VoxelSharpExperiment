@@ -1,0 +1,5 @@
+bin/
+obj/
+worlds/
+*.user
+.vs/

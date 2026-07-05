@@ -1,0 +1,9 @@
+{
+  "id": "stone",
+  "name": "Stone",
+  "textures": { "all": "stone.png" },
+  "hardness": 1.5,
+  "tool": { "type": "pickaxe", "minTier": 0, "required": true },
+  "sounds": "stone",
+  "drops": [{ "item": "cobblestone", "count": 1, "chance": 1.0 }]
+}

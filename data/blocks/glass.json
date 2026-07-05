@@ -1,0 +1,9 @@
+{
+  "id": "glass",
+  "name": "Glass",
+  "textures": { "all": "glass.png" },
+  "hardness": 0.3,
+  "transparency": "cutout",
+  "sounds": "glass",
+  "drops": []
+}

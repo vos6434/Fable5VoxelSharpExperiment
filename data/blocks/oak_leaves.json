@@ -1,0 +1,10 @@
+{
+  "id": "oak_leaves",
+  "name": "Oak Leaves",
+  "textures": { "all": "oak_leaves.png" },
+  "hardness": 0.2,
+  "transparency": "cutout",
+  "sounds": "grass",
+  "drops": [],
+  "flags": { "isFoliage": true, "flammable": true }
+}

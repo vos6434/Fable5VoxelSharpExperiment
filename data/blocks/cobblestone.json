@@ -1,0 +1,8 @@
+{
+  "id": "cobblestone",
+  "name": "Cobblestone",
+  "textures": { "all": "cobblestone.png" },
+  "hardness": 2.0,
+  "tool": { "type": "pickaxe", "minTier": 0, "required": true },
+  "sounds": "stone"
+}

@@ -1,0 +1,11 @@
+{
+  "id": "water",
+  "name": "Water",
+  "textures": { "all": "water.png" },
+  "hardness": -1,
+  "transparency": "translucent",
+  "collision": "liquid",
+  "sounds": "liquid",
+  "drops": [],
+  "flags": { "isLiquid": true }
+}

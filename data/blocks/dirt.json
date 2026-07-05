@@ -1,0 +1,8 @@
+{
+  "id": "dirt",
+  "name": "Dirt",
+  "textures": { "all": "dirt.png" },
+  "hardness": 0.5,
+  "tool": { "type": "shovel", "minTier": 0, "required": false },
+  "sounds": "gravel"
+}

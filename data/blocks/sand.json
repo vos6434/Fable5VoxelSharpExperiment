@@ -1,0 +1,8 @@
+{
+  "id": "sand",
+  "name": "Sand",
+  "textures": { "all": "sand.png" },
+  "hardness": 0.5,
+  "tool": { "type": "shovel", "minTier": 0, "required": false },
+  "sounds": "sand"
+}

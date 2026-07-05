@@ -1,0 +1,6 @@
+{
+  "id": "stick",
+  "name": "Stick",
+  "icon": "stick_icon.png",
+  "maxStack": 100
+}

@@ -1,0 +1,13 @@
+{
+  "id": "oak_log",
+  "name": "Oak Log",
+  "textures": {
+    "top": "oak_log_top.png",
+    "bottom": "oak_log_top.png",
+    "side": "oak_log_side.png"
+  },
+  "hardness": 2.0,
+  "tool": { "type": "axe", "minTier": 0, "required": false },
+  "sounds": "wood",
+  "flags": { "flammable": true }
+}

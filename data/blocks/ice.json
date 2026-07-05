@@ -1,0 +1,9 @@
+{
+  "id": "ice",
+  "name": "Ice",
+  "textures": { "all": "ice.png" },
+  "hardness": 0.5,
+  "transparency": "translucent",
+  "sounds": "glass",
+  "drops": []
+}

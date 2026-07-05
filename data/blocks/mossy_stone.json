@@ -1,0 +1,9 @@
+{
+  "id": "mossy_stone",
+  "name": "Mossy Stone",
+  "textures": { "all": "mossy_stone.png" },
+  "hardness": 1.6,
+  "tool": { "type": "pickaxe", "minTier": 0, "required": true },
+  "sounds": "stone",
+  "drops": [{ "item": "cobblestone", "count": 1, "chance": 1.0 }]
+}

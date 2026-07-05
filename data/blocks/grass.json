@@ -1,0 +1,14 @@
+{
+  "id": "grass",
+  "name": "Grass Block",
+  "textures": {
+    "top": "grass_top.png",
+    "bottom": "dirt.png",
+    "side": "grass_side.png"
+  },
+  "icon": "grass_icon.png",
+  "hardness": 0.6,
+  "tool": { "type": "shovel", "minTier": 0, "required": false },
+  "sounds": "grass",
+  "drops": [{ "item": "dirt", "count": 1, "chance": 1.0 }]
+}

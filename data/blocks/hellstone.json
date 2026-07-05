@@ -1,0 +1,9 @@
+{
+  "id": "hellstone",
+  "name": "Hellstone",
+  "textures": { "all": "hellstone.png" },
+  "hardness": 0.8,
+  "tool": { "type": "pickaxe", "minTier": 0, "required": true },
+  "sounds": "stone",
+  "flags": { "flammable": true }
+}

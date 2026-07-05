@@ -1,0 +1,8 @@
+{
+  "id": "hotbar",
+  "kind": "hud",
+  "texture": "hotbar.png",
+  "slotGroups": [
+    { "role": "hotbar", "x": 3, "y": 3, "cols": 10, "rows": 1, "cell": 20, "size": 16 }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "id": "inventory",
+  "kind": "window",
+  "title": "Inventory",
+  "texture": "inventory.png",
+  "slotGroups": [
+    { "role": "armor", "x": 8, "y": 8, "cols": 1, "rows": 4, "cell": 18, "size": 16 },
+    { "role": "craft", "x": 116, "y": 18, "cols": 2, "rows": 2, "cell": 18, "size": 16 },
+    { "role": "craft_result", "x": 172, "y": 28, "cols": 1, "rows": 1, "cell": 18, "size": 16 },
+    { "role": "storage", "x": 8, "y": 84, "cols": 10, "rows": 3, "cell": 18, "size": 16 }
+  ]
+}

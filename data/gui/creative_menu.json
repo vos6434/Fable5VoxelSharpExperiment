@@ -1,0 +1,9 @@
+{
+  "id": "creative_menu",
+  "kind": "window",
+  "title": "Creative",
+  "texture": "creative_menu.png",
+  "slotGroups": [
+    { "role": "creative", "x": 9, "y": 18, "cols": 10, "rows": 5, "cell": 18, "size": 16 }
+  ]
+}

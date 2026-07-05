@@ -1,0 +1,7 @@
+{
+  "id": "wooden_pickaxe",
+  "name": "Wooden Pickaxe",
+  "icon": "wooden_pickaxe_icon.png",
+  "maxStack": 1,
+  "tool": { "type": "pickaxe", "tier": 0, "speed": 2.0 }
+}

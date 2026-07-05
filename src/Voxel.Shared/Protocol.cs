@@ -1,0 +1,241 @@
+using System.Buffers.Binary;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace Voxel.Shared;
+
+/// <summary>
+/// Binary WebSocket protocol, byte-compatible with the web version: one type
+/// byte followed by a type-specific body — little-endian numbers, JSON bodies
+/// for low-rate control messages, raw-deflate compressed block arrays for
+/// chunk payloads. Golden tests pin the exact byte layout.
+/// </summary>
+public enum Msg : byte
+{
+    // client → server
+    Hello = 1,        // JSON { name }
+    ChunkRequest = 2, // u16 count, count x (i32 cx, i32 cy, i32 cz)
+    Move = 3,         // f64 x,y,z, f32 yaw, f32 pitch
+    SetBlock = 4,     // i32 x,y,z, u16 blockId (0 = break)
+    // server → client
+    Welcome = 10,     // JSON { playerId, seed, spawn, palette }
+    ChunkData = 11,   // i32 cx,cy,cz, u8 empty, [deflate-raw u16 LE blocks]
+    BlockUpdate = 12, // i32 x,y,z, u16 blockId
+    PlayerJoin = 13,  // JSON { id, name }
+    PlayerLeave = 14, // JSON { id }
+    PlayerMoves = 15, // u16 count, count x (u16 id, f32 x,y,z,yaw,pitch)
+}
+
+public sealed class WelcomePayload
+{
+    [JsonPropertyName("playerId")] public required int PlayerId { get; init; }
+    [JsonPropertyName("seed")] public required int Seed { get; init; }
+    [JsonPropertyName("spawn")] public required SpawnPoint Spawn { get; init; }
+    /// <summary>Server's block palette (stringIds by numericId); must match the client's.</summary>
+    [JsonPropertyName("palette")] public required string[] Palette { get; init; }
+}
+
+public sealed class SpawnPoint
+{
+    [JsonPropertyName("x")] public required double X { get; init; }
+    [JsonPropertyName("y")] public required double Y { get; init; }
+    [JsonPropertyName("z")] public required double Z { get; init; }
+}
+
+public sealed class PlayerJoinPayload
+{
+    [JsonPropertyName("id")] public required int Id { get; init; }
+    [JsonPropertyName("name")] public required string Name { get; init; }
+}
+
+public sealed class PlayerLeavePayload
+{
+    [JsonPropertyName("id")] public required int Id { get; init; }
+}
+
+public sealed class HelloPayload
+{
+    [JsonPropertyName("name")] public required string Name { get; init; }
+}
+
+public readonly record struct PlayerMove(ushort Id, float X, float Y, float Z, float Yaw, float Pitch);
+
+public readonly record struct MovePayload(double X, double Y, double Z, float Yaw, float Pitch);
+
+public readonly record struct BlockChange(int X, int Y, int Z, ushort BlockId);
+
+public readonly record struct ChunkDataHeader(int Cx, int Cy, int Cz, bool Empty, ReadOnlyMemory<byte> Payload);
+
+public static class Protocol
+{
+    public const int Port = 8081;
+
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.Never,
+    };
+
+    public static Msg TypeOf(ReadOnlySpan<byte> message) => (Msg)message[0];
+
+    // ---- JSON messages ------------------------------------------------------
+
+    public static byte[] EncodeJson<T>(Msg type, T payload)
+    {
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions);
+        var outBuf = new byte[1 + body.Length];
+        outBuf[0] = (byte)type;
+        body.CopyTo(outBuf, 1);
+        return outBuf;
+    }
+
+    public static T DecodeJson<T>(ReadOnlySpan<byte> message)
+    {
+        return JsonSerializer.Deserialize<T>(message[1..], JsonOptions)
+            ?? throw new InvalidDataException("null JSON payload");
+    }
+
+    // ---- ChunkRequest -------------------------------------------------------
+
+    public static byte[] EncodeChunkRequest(IReadOnlyList<(int Cx, int Cy, int Cz)> coords)
+    {
+        var outBuf = new byte[3 + coords.Count * 12];
+        outBuf[0] = (byte)Msg.ChunkRequest;
+        BinaryPrimitives.WriteUInt16LittleEndian(outBuf.AsSpan(1), (ushort)coords.Count);
+        for (int i = 0; i < coords.Count; i++)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(3 + i * 12), coords[i].Cx);
+            BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(7 + i * 12), coords[i].Cy);
+            BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(11 + i * 12), coords[i].Cz);
+        }
+        return outBuf;
+    }
+
+    public static List<(int Cx, int Cy, int Cz)> DecodeChunkRequest(ReadOnlySpan<byte> message)
+    {
+        int count = BinaryPrimitives.ReadUInt16LittleEndian(message[1..]);
+        var coords = new List<(int, int, int)>(count);
+        for (int i = 0; i < count; i++)
+        {
+            coords.Add((
+                BinaryPrimitives.ReadInt32LittleEndian(message[(3 + i * 12)..]),
+                BinaryPrimitives.ReadInt32LittleEndian(message[(7 + i * 12)..]),
+                BinaryPrimitives.ReadInt32LittleEndian(message[(11 + i * 12)..])));
+        }
+        return coords;
+    }
+
+    // ---- ChunkData ----------------------------------------------------------
+
+    public static byte[] EncodeChunkData(int cx, int cy, int cz, byte[]? compressed)
+    {
+        int payloadLength = compressed?.Length ?? 0;
+        var outBuf = new byte[14 + payloadLength];
+        outBuf[0] = (byte)Msg.ChunkData;
+        BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(1), cx);
+        BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(5), cy);
+        BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(9), cz);
+        outBuf[13] = (byte)(compressed is null ? 1 : 0); // 1 = empty chunk
+        compressed?.CopyTo(outBuf, 14);
+        return outBuf;
+    }
+
+    public static ChunkDataHeader DecodeChunkData(ReadOnlyMemory<byte> message)
+    {
+        var span = message.Span;
+        return new ChunkDataHeader(
+            BinaryPrimitives.ReadInt32LittleEndian(span[1..]),
+            BinaryPrimitives.ReadInt32LittleEndian(span[5..]),
+            BinaryPrimitives.ReadInt32LittleEndian(span[9..]),
+            span[13] == 1,
+            message[14..]);
+    }
+
+    // ---- Move ---------------------------------------------------------------
+
+    public static byte[] EncodeMove(double x, double y, double z, float yaw, float pitch)
+    {
+        var outBuf = new byte[33];
+        outBuf[0] = (byte)Msg.Move;
+        BinaryPrimitives.WriteDoubleLittleEndian(outBuf.AsSpan(1), x);
+        BinaryPrimitives.WriteDoubleLittleEndian(outBuf.AsSpan(9), y);
+        BinaryPrimitives.WriteDoubleLittleEndian(outBuf.AsSpan(17), z);
+        BinaryPrimitives.WriteSingleLittleEndian(outBuf.AsSpan(25), yaw);
+        BinaryPrimitives.WriteSingleLittleEndian(outBuf.AsSpan(29), pitch);
+        return outBuf;
+    }
+
+    public static MovePayload DecodeMove(ReadOnlySpan<byte> message)
+    {
+        return new MovePayload(
+            BinaryPrimitives.ReadDoubleLittleEndian(message[1..]),
+            BinaryPrimitives.ReadDoubleLittleEndian(message[9..]),
+            BinaryPrimitives.ReadDoubleLittleEndian(message[17..]),
+            BinaryPrimitives.ReadSingleLittleEndian(message[25..]),
+            BinaryPrimitives.ReadSingleLittleEndian(message[29..]));
+    }
+
+    // ---- SetBlock / BlockUpdate (same layout, different type byte) -----------
+
+    public static byte[] EncodeBlockChange(Msg type, int x, int y, int z, ushort blockId)
+    {
+        if (type != Msg.SetBlock && type != Msg.BlockUpdate)
+        {
+            throw new ArgumentException($"not a block-change message type: {type}", nameof(type));
+        }
+        var outBuf = new byte[15];
+        outBuf[0] = (byte)type;
+        BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(1), x);
+        BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(5), y);
+        BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(9), z);
+        BinaryPrimitives.WriteUInt16LittleEndian(outBuf.AsSpan(13), blockId);
+        return outBuf;
+    }
+
+    public static BlockChange DecodeBlockChange(ReadOnlySpan<byte> message)
+    {
+        return new BlockChange(
+            BinaryPrimitives.ReadInt32LittleEndian(message[1..]),
+            BinaryPrimitives.ReadInt32LittleEndian(message[5..]),
+            BinaryPrimitives.ReadInt32LittleEndian(message[9..]),
+            BinaryPrimitives.ReadUInt16LittleEndian(message[13..]));
+    }
+
+    // ---- PlayerMoves ----------------------------------------------------------
+
+    public static byte[] EncodePlayerMoves(IReadOnlyList<PlayerMove> players)
+    {
+        var outBuf = new byte[3 + players.Count * 22];
+        outBuf[0] = (byte)Msg.PlayerMoves;
+        BinaryPrimitives.WriteUInt16LittleEndian(outBuf.AsSpan(1), (ushort)players.Count);
+        for (int i = 0; i < players.Count; i++)
+        {
+            int o = 3 + i * 22;
+            PlayerMove p = players[i];
+            BinaryPrimitives.WriteUInt16LittleEndian(outBuf.AsSpan(o), p.Id);
+            BinaryPrimitives.WriteSingleLittleEndian(outBuf.AsSpan(o + 2), p.X);
+            BinaryPrimitives.WriteSingleLittleEndian(outBuf.AsSpan(o + 6), p.Y);
+            BinaryPrimitives.WriteSingleLittleEndian(outBuf.AsSpan(o + 10), p.Z);
+            BinaryPrimitives.WriteSingleLittleEndian(outBuf.AsSpan(o + 14), p.Yaw);
+            BinaryPrimitives.WriteSingleLittleEndian(outBuf.AsSpan(o + 18), p.Pitch);
+        }
+        return outBuf;
+    }
+
+    public static PlayerMove[] DecodePlayerMoves(ReadOnlySpan<byte> message)
+    {
+        int count = BinaryPrimitives.ReadUInt16LittleEndian(message[1..]);
+        var players = new PlayerMove[count];
+        for (int i = 0; i < count; i++)
+        {
+            int o = 3 + i * 22;
+            players[i] = new PlayerMove(
+                BinaryPrimitives.ReadUInt16LittleEndian(message[o..]),
+                BinaryPrimitives.ReadSingleLittleEndian(message[(o + 2)..]),
+                BinaryPrimitives.ReadSingleLittleEndian(message[(o + 6)..]),
+                BinaryPrimitives.ReadSingleLittleEndian(message[(o + 10)..]),
+                BinaryPrimitives.ReadSingleLittleEndian(message[(o + 14)..]),
+                BinaryPrimitives.ReadSingleLittleEndian(message[(o + 18)..]));
+        }
+        return players;
+    }
+}

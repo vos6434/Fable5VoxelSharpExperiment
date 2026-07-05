@@ -1,0 +1,8 @@
+{
+  "id": "bedrock",
+  "name": "Bedrock",
+  "textures": { "all": "bedrock.png" },
+  "hardness": -1,
+  "sounds": "stone",
+  "drops": []
+}

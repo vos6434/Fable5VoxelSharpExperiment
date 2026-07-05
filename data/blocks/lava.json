@@ -1,0 +1,11 @@
+{
+  "id": "lava",
+  "name": "Lava",
+  "textures": { "all": "lava.png" },
+  "hardness": -1,
+  "lightEmission": 15,
+  "collision": "liquid",
+  "sounds": "liquid",
+  "drops": [],
+  "flags": { "isLiquid": true, "isHazard": true }
+}

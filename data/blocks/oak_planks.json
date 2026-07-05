@@ -1,0 +1,9 @@
+{
+  "id": "oak_planks",
+  "name": "Oak Planks",
+  "textures": { "all": "oak_planks.png" },
+  "hardness": 2.0,
+  "tool": { "type": "axe", "minTier": 0, "required": false },
+  "sounds": "wood",
+  "flags": { "flammable": true }
+}
