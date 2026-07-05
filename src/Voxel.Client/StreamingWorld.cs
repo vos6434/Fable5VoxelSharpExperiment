@@ -33,6 +33,7 @@ public sealed class StreamingWorld : IDisposable
         public MeshState State;
         public long MeshVersion;
         public ChunkMesh? Solid;
+        public ChunkMesh? LiquidSurface;
         public ChunkMesh? Translucent;
     }
 
@@ -57,7 +58,7 @@ public sealed class StreamingWorld : IDisposable
     {
         _gl = gl;
         _connection = connection;
-        _pool = new MesherPool(data.Blocks.Opaque, data.RenderTable, data.TranslucentMask, data.EmissiveMask);
+        _pool = new MesherPool(data.Blocks.Opaque, data.RenderTable, data.TranslucentMask, data.FlatAoMask, data.EmissiveMask);
     }
 
     public (int Loaded, int Rendered, int PendingMesh, int AwaitingNet, int Workers) Stats
@@ -67,7 +68,7 @@ public sealed class StreamingWorld : IDisposable
             int rendered = 0;
             foreach (var e in _chunks.Values)
             {
-                if (e.State == MeshState.Done && (e.Solid is not null || e.Translucent is not null)) rendered++;
+                if (e.State == MeshState.Done && (e.Solid is not null || e.LiquidSurface is not null || e.Translucent is not null)) rendered++;
             }
             return (_chunks.Count, rendered, _pool.Pending, _requested.Count, _pool.WorkerCount);
         }
@@ -141,6 +142,14 @@ public sealed class StreamingWorld : IDisposable
         foreach (var e in _chunks.Values)
         {
             if (e.Solid is not null) yield return (e.Cx, e.Cy, e.Cz, e.Solid);
+        }
+    }
+
+    public IEnumerable<(int Cx, int Cy, int Cz, ChunkMesh Mesh)> LiquidSurfaceMeshes()
+    {
+        foreach (var e in _chunks.Values)
+        {
+            if (e.LiquidSurface is not null) yield return (e.Cx, e.Cy, e.Cz, e.LiquidSurface);
         }
     }
 
@@ -263,8 +272,10 @@ public sealed class StreamingWorld : IDisposable
         if (!_chunks.TryGetValue(completed.Job.Key, out var entry)) return;    // unloaded meanwhile
         if (entry.MeshVersion != completed.Job.Version) return;                // edited meanwhile
         entry.Solid?.Dispose();
+        entry.LiquidSurface?.Dispose();
         entry.Translucent?.Dispose();
         entry.Solid = completed.Result.Solid is null ? null : new ChunkMesh(_gl, completed.Result.Solid);
+        entry.LiquidSurface = completed.Result.LiquidSurface is null ? null : new ChunkMesh(_gl, completed.Result.LiquidSurface);
         entry.Translucent = completed.Result.Translucent is null ? null : new ChunkMesh(_gl, completed.Result.Translucent);
         entry.State = MeshState.Done;
     }
@@ -279,6 +290,7 @@ public sealed class StreamingWorld : IDisposable
             int dz = entry.Cz - _center.Z;
             if (dx * dx + dy * dy + dz * dz <= UnloadRadius * UnloadRadius) continue;
             entry.Solid?.Dispose();
+            entry.LiquidSurface?.Dispose();
             entry.Translucent?.Dispose();
             entry.MeshVersion++; // invalidates any in-flight mesh job
             (toRemove ??= new List<(int, int, int)>()).Add(key);
@@ -312,6 +324,7 @@ public sealed class StreamingWorld : IDisposable
         foreach (var entry in _chunks.Values)
         {
             entry.Solid?.Dispose();
+            entry.LiquidSurface?.Dispose();
             entry.Translucent?.Dispose();
         }
         _pool.Dispose();

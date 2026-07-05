@@ -5,3 +5,4 @@ worlds/
 .vs/
 settings.json
 dist/
+artifacts/

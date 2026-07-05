@@ -20,8 +20,10 @@ public sealed class ClientData
     public required int LayerCount { get; init; }
     /// <summary>renderTable[numericId * 6 + faceIndex] = atlas layer (FACE_DIRS order).</summary>
     public required ushort[] RenderTable { get; init; }
-    /// <summary>translucentMask[numericId] = 1 for alpha-blended blocks (water, ice).</summary>
+    /// <summary>translucentMask[numericId] = 1 for alpha-blended blocks (water).</summary>
     public required byte[] TranslucentMask { get; init; }
+    /// <summary>flatAoMask[numericId] = 1 skips baked corner AO (chunk-boundary seams on ice/water).</summary>
+    public required byte[] FlatAoMask { get; init; }
     /// <summary>emissiveMask[numericId] = 1 for light-emitting blocks (rendered fullbright).</summary>
     public required byte[] EmissiveMask { get; init; }
 
@@ -65,11 +67,13 @@ public sealed class ClientData
 
         var renderTable = new ushort[blocks.Count * 6];
         var translucentMask = new byte[blocks.Count];
+        var flatAoMask = new byte[blocks.Count];
         var emissiveMask = new byte[blocks.Count];
         foreach (var def in blocks.Defs)
         {
             if (def.NumericId == 0) continue;
             translucentMask[def.NumericId] = (byte)(def.Transparency == Transparency.Translucent ? 1 : 0);
+            flatAoMask[def.NumericId] = (byte)(def.StringId == "ice" || def.Transparency == Transparency.Translucent ? 1 : 0);
             emissiveMask[def.NumericId] = (byte)(def.LightEmission > 0 ? 1 : 0);
             foreach (var face in faceDirs)
             {
@@ -85,6 +89,7 @@ public sealed class ClientData
             LayerCount = textureNames.Count,
             RenderTable = renderTable,
             TranslucentMask = translucentMask,
+            FlatAoMask = flatAoMask,
             EmissiveMask = emissiveMask,
         };
     }

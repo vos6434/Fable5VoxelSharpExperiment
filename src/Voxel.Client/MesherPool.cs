@@ -29,12 +29,12 @@ public sealed class MesherPool : IDisposable
 
     public int Pending => Volatile.Read(ref _pending);
 
-    public MesherPool(byte[] opaque, ushort[] renderTable, byte[] translucentMask, byte[] emissiveMask)
+    public MesherPool(byte[] opaque, ushort[] renderTable, byte[] translucentMask, byte[] flatAoMask, byte[] emissiveMask)
     {
         WorkerCount = Math.Clamp(Environment.ProcessorCount - 1, 1, 4);
         for (int i = 0; i < WorkerCount; i++)
         {
-            var thread = new Thread(() => WorkerLoop(opaque, renderTable, translucentMask, emissiveMask))
+            var thread = new Thread(() => WorkerLoop(opaque, renderTable, translucentMask, flatAoMask, emissiveMask))
             {
                 IsBackground = true,
                 Name = $"mesher-{i}",
@@ -58,7 +58,7 @@ public sealed class MesherPool : IDisposable
         }
     }
 
-    private void WorkerLoop(byte[] opaque, ushort[] renderTable, byte[] translucentMask, byte[] emissiveMask)
+    private void WorkerLoop(byte[] opaque, ushort[] renderTable, byte[] translucentMask, byte[] flatAoMask, byte[] emissiveMask)
     {
         var reader = _jobs.Reader;
         try
@@ -70,7 +70,7 @@ public sealed class MesherPool : IDisposable
                     if (!reader.WaitToReadAsync(_cts.Token).AsTask().GetAwaiter().GetResult()) return;
                     continue;
                 }
-                var result = GreedyMesher.Mesh(job.Blocks, job.Neighbors, opaque, renderTable, translucentMask, emissiveMask);
+                var result = GreedyMesher.Mesh(job.Key.Cx, job.Key.Cy, job.Key.Cz, job.Blocks, job.Neighbors, opaque, renderTable, translucentMask, flatAoMask, emissiveMask);
                 _results.Enqueue(new Completed(job, result));
                 Interlocked.Decrement(ref _pending);
             }

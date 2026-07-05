@@ -3,7 +3,7 @@
   "name": "Ice",
   "textures": { "all": "ice.png" },
   "hardness": 0.5,
-  "transparency": "translucent",
+  "transparency": "cutout",
   "sounds": "glass",
   "drops": []
 }
