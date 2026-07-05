@@ -29,7 +29,7 @@ public sealed class MeshPass
     public int IndexCount => Indices.Length;
 }
 
-public sealed record MeshResult(MeshPass? Solid, MeshPass? Translucent);
+public sealed record MeshResult(MeshPass? Solid, MeshPass? LiquidSurface, MeshPass? Translucent);
 
 public static class GreedyMesher
 {
@@ -93,13 +93,17 @@ public static class GreedyMesher
 
     /// <param name="neighbors">Neighbor chunk contents in FACE_DIRS order (px,nx,py,ny,pz,nz); null = treat as air.</param>
     public static MeshResult Mesh(
+        int cx, int cy, int cz,
         ushort[] blocks,
         ushort[]?[] neighbors,
         byte[] opaque,
         ushort[] renderTable,
         byte[] translucentMask,
+        byte[] flatAoMask,
         byte[] emissiveMask)
     {
+        int ox = cx * S, oy = cy * S, oz = cz * S;
+        ReadOnlySpan<int> chunkOrigin = stackalloc int[] { ox, oy, oz };
         ushort[]? nPx = neighbors[0], nNx = neighbors[1], nPy = neighbors[2];
         ushort[]? nNy = neighbors[3], nPz = neighbors[4], nNz = neighbors[5];
 
@@ -120,6 +124,7 @@ public static class GreedyMesher
         }
 
         var solid = new PassBuilder();
+        var liquidSurface = new PassBuilder();
         var translucent = new PassBuilder();
         // Merge key per cell: block id (16 bits) | packed corner AO (8 bits).
         var mask = new uint[S * S];
@@ -191,16 +196,20 @@ public static class GreedyMesher
                         uint cell = mask[mv * S + mu];
                         if (cell == 0) continue;
                         ushort id = (ushort)(cell & 0xFFFF);
+                        bool isTranslucent = translucentMask[id] == 1;
+                        bool flatAo = flatAoMask[id] == 1;
+                        bool mergeById = isTranslucent || flatAo;
 
                         int w = 1;
-                        while (mu + w < S && mask[mv * S + mu + w] == cell) w++;
+                        while (mu + w < S && (mergeById ? (mask[mv * S + mu + w] & 0xFFFF) == id : mask[mv * S + mu + w] == cell)) w++;
                         int h = 1;
                         while (mv + h < S)
                         {
                             bool rowMatches = true;
                             for (int k = 0; k < w; k++)
                             {
-                                if (mask[(mv + h) * S + mu + k] != cell) { rowMatches = false; break; }
+                                uint other = mask[(mv + h) * S + mu + k];
+                                if (mergeById ? (other & 0xFFFF) != id : other != cell) { rowMatches = false; break; }
                             }
                             if (!rowMatches) break;
                             h++;
@@ -218,26 +227,51 @@ public static class GreedyMesher
                         SetCorner(c2, d, plane, u, mu + w, v, mv + h);
                         SetCorner(c3, d, plane, u, mu, v, mv + h);
 
-                        // Per-corner brightness = face shade × corner AO, +4.0
-                        // emissive flag (shader renders those fullbright).
+                        // Skip baked AO on ice/water — corner samples differ at chunk
+                        // edges and produced visible grid seams.
                         uint ao = cell >> 16;
                         float emissive = emissiveMask[id] == 1 ? 4f : 0f;
-                        brightness4[0] = brightness * AoFactor[ao & 3] + emissive;
-                        brightness4[1] = brightness * AoFactor[(ao >> 2) & 3] + emissive;
-                        brightness4[2] = brightness * AoFactor[(ao >> 4) & 3] + emissive;
-                        brightness4[3] = brightness * AoFactor[(ao >> 6) & 3] + emissive;
+                        if (flatAo)
+                        {
+                            brightness4[0] = brightness4[1] = brightness4[2] = brightness4[3] = brightness + emissive;
+                        }
+                        else
+                        {
+                            brightness4[0] = brightness * AoFactor[ao & 3] + emissive;
+                            brightness4[1] = brightness * AoFactor[(ao >> 2) & 3] + emissive;
+                            brightness4[2] = brightness * AoFactor[(ao >> 4) & 3] + emissive;
+                            brightness4[3] = brightness * AoFactor[(ao >> 6) & 3] + emissive;
+                        }
 
-                        var target = translucentMask[id] == 1 ? translucent : solid;
+                        // World-anchored UVs (one unit per block) so atlas repeat
+                        // tiles continuously across chunk boundaries.
+                        float u0 = chunkOrigin[u] + mu;
+                        float u1 = chunkOrigin[u] + mu + w;
+                        float v0 = chunkOrigin[v] + mv;
+                        float v1 = chunkOrigin[v] + mv + h;
+
+                        // NOTE: no chunk-border overlap nudge here. Overlapping
+                        // liquid-surface quads from adjacent chunks double-blend
+                        // (a darker grid on water). Adjacent greedy quads share an
+                        // exact integer edge, so the rasterizer fill rule covers it
+                        // once — no gap, no overlap.
+
+                        var target = isTranslucent switch
+                        {
+                            true when flatAo && faceIndex is 2 or 3 => liquidSurface,
+                            true => translucent,
+                            _ => solid,
+                        };
                         target.Quad(
                             c0, c1, c2, c3,
-                            mu, mv, mu + w, mv + h,
+                            u0, v0, u1, v1,
                             renderTable[id * 6 + faceIndex], brightness4, flip);
                     }
                 }
             }
         }
 
-        return new MeshResult(solid.Build(), translucent.Build());
+        return new MeshResult(solid.Build(), liquidSurface.Build(), translucent.Build());
     }
 
     private static void SetCorner(Span<float> c, int d, int dCoord, int u, int uCoord, int v, int vCoord)

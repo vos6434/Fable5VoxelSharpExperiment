@@ -578,11 +578,24 @@ public sealed class Game
             draws++;
         }
 
-        // Translucent pass: blended, no depth writes, both faces (water from below).
+        // Liquid surfaces (water/lava tops): alpha blend with depth writes.
+        // Depth-write keeps each pixel a single blend; adjacent chunks' quads
+        // abut on an exact integer edge (no overlap) so there is no seam.
         _shader.SetFloat("uAlphaTest", 0.01f);
         _gl.Disable(EnableCap.CullFace);
         _gl.Enable(EnableCap.Blend);
         _gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+        _gl.DepthMask(true);
+        foreach (var (cx, cy, cz, mesh) in _world.LiquidSurfaceMeshes())
+        {
+            if (!ChunkVisible(cx, cy, cz)) continue;
+            _shader.SetVec3("uChunkOrigin", cx * Constants.ChunkSize, cy * Constants.ChunkSize, cz * Constants.ChunkSize);
+            mesh.Draw();
+            triangles += mesh.IndexCount / 3;
+            draws++;
+        }
+
+        // Translucent pass (water sides, lava): blended, no depth writes.
         _gl.DepthMask(false);
         foreach (var (cx, cy, cz, mesh) in _world.TranslucentMeshes())
         {
