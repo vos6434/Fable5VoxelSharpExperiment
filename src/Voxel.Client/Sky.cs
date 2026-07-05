@@ -24,13 +24,19 @@ public readonly struct SkyState
     /// <summary>0 at night, 1 at full day — drives ambient and shadow strength.</summary>
     public readonly float DayAmount;
     public readonly float MoonVisibility;
+    /// <summary>Shadow-casting light direction: the sun while it's up, else the moon (opposite azimuth).</summary>
+    public readonly (float X, float Y, float Z) DirLightDir;
+    /// <summary>Shadow-casting light color × intensity (peak ~1 for the noon sun, ~0.25 cool for the moon).</summary>
+    public readonly (float R, float G, float B) DirLightColor;
 
     public SkyState(
         (float, float, float) sunDir, (float, float, float) zenith, (float, float, float) horizon,
-        (float, float, float) sunDisc, (float, float, float) light, float dayAmount, float moonVisibility)
+        (float, float, float) sunDisc, (float, float, float) light, float dayAmount, float moonVisibility,
+        (float, float, float) dirLightDir, (float, float, float) dirLightColor)
     {
         SunDir = sunDir; Zenith = zenith; Horizon = horizon;
         SunDiscColor = sunDisc; LightColor = light; DayAmount = dayAmount; MoonVisibility = moonVisibility;
+        DirLightDir = dirLightDir; DirLightColor = dirLightColor;
     }
 
     private static (float, float, float) Mix((float R, float G, float B) a, (float R, float G, float B) b, float t)
@@ -81,7 +87,27 @@ public readonly struct SkyState
         var moonlight = (0.10f * moonVis, 0.12f * moonVis, 0.18f * moonVis);
         var light = (sunlight.Item1 + moonlight.Item1, sunlight.Item2 + moonlight.Item2, sunlight.Item3 + moonlight.Item3);
 
-        return new SkyState(sunDir, zenith, horizon, sunDisc, light, dayAmount, moonVis);
+        // Shadow-casting directional light (plan 02 M7): the sun by day; at
+        // night the moon takes over from the opposite azimuth at ~25% cool
+        // intensity, so night scenes still have crisp (dimmer) shadows. Both
+        // fade around the horizon; at dusk neither dominates (soft twilight).
+        var moonDir = (-sunDir.Item1, -sunDir.Item2, sunDir.Item3);
+        float sunF = Smoothstep(-0.02f, 0.15f, elevation);
+        float moonF = Smoothstep(0.05f, 0.25f, -elevation);
+        (float, float, float) dirLightDir;
+        (float, float, float) dirLightColor;
+        if (sunF >= moonF)
+        {
+            dirLightDir = sunDir;
+            dirLightColor = (sunDisc.Item1 * sunF, sunDisc.Item2 * sunF, sunDisc.Item3 * sunF);
+        }
+        else
+        {
+            dirLightDir = moonDir;
+            dirLightColor = (0.20f * moonF, 0.23f * moonF, 0.33f * moonF);
+        }
+
+        return new SkyState(sunDir, zenith, horizon, sunDisc, light, dayAmount, moonVis, dirLightDir, dirLightColor);
     }
 }
 

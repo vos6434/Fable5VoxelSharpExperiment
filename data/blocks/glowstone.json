@@ -4,5 +4,6 @@
   "textures": { "all": "glowstone.png" },
   "hardness": 0.3,
   "lightEmission": 15,
+  "lightColor": "#FFD9A0",
   "sounds": "glass"
 }

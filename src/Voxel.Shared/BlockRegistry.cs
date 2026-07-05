@@ -17,6 +17,22 @@ public enum Collision { Solid, None, Liquid }
 
 public sealed record BlockTextures(string? All, string? Top, string? Bottom, string? Side);
 
+/// <summary>Emitted light color, parsed from optional "#RRGGBB" JSON (default white).</summary>
+public readonly record struct LightColor(float R, float G, float B)
+{
+    public static readonly LightColor White = new(1f, 1f, 1f);
+
+    public static LightColor Parse(string source, string hex)
+    {
+        if (hex.Length != 7 || hex[0] != '#' ||
+            !int.TryParse(hex.AsSpan(1), System.Globalization.NumberStyles.HexNumber, null, out int rgb))
+        {
+            throw new DataException(source, $"\"lightColor\" must be \"#RRGGBB\", got \"{hex}\"");
+        }
+        return new LightColor(((rgb >> 16) & 255) / 255f, ((rgb >> 8) & 255) / 255f, (rgb & 255) / 255f);
+    }
+}
+
 public sealed record DropEntry(string Item, int Count, double Chance);
 
 public sealed record ToolRule(string Type, int MinTier, bool Required);
@@ -31,6 +47,7 @@ public sealed class BlockDefinition
     public required double Hardness { get; init; }
     public required ToolRule Tool { get; init; }
     public required int LightEmission { get; init; }
+    public required LightColor LightColor { get; init; }
     public required Transparency Transparency { get; init; }
     public required Collision Collision { get; init; }
     public required string Sounds { get; init; }
@@ -131,13 +148,14 @@ public sealed class BlockRegistry
         Sounds = "none",
         Drops = [],
         Flags = new Dictionary<string, bool>(),
+        LightColor = LightColor.White,
     };
 }
 
 /// <summary>Parsed block definition before a numeric id is assigned.</summary>
 public sealed record ParsedBlock(
     string StringId, string Name, BlockTextures Textures, string? Icon, double Hardness,
-    ToolRule Tool, int LightEmission, Transparency Transparency, Collision Collision,
+    ToolRule Tool, int LightEmission, LightColor LightColor, Transparency Transparency, Collision Collision,
     string Sounds, IReadOnlyList<DropEntry> Drops, IReadOnlyDictionary<string, bool> Flags)
 {
     public BlockDefinition WithNumericId(int numericId) => new()
@@ -150,6 +168,7 @@ public sealed record ParsedBlock(
         Hardness = Hardness,
         Tool = Tool,
         LightEmission = LightEmission,
+        LightColor = LightColor,
         Transparency = Transparency,
         Collision = Collision,
         Sounds = Sounds,
@@ -257,6 +276,7 @@ public static class BlockParser
             hardness,
             tool,
             (int)Json.OptionalNumber(source, obj, "lightEmission", 0, 0, 15, integer: true),
+            Json.OptionalString(source, obj, "lightColor") is { } lc ? LightColor.Parse(source, lc) : LightColor.White,
             Json.OptionalEnum(source, obj, "transparency", Transparency.Opaque,
                 ("opaque", Transparency.Opaque), ("cutout", Transparency.Cutout), ("translucent", Transparency.Translucent)),
             Json.OptionalEnum(source, obj, "collision", Collision.Solid,

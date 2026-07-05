@@ -24,6 +24,12 @@ public sealed class Settings
     [JsonPropertyName("hotbarPos")] public float[]? HotbarPos { get; set; }
     [JsonPropertyName("hotbarUnlocked")] public bool HotbarUnlocked { get; set; }
 
+    // ---- lighting quality (plan 02 M8) ----------------------------------
+    /// <summary>Block lights per cluster that cast shadow rays (0/2/4/8).</summary>
+    [JsonPropertyName("shadowedLightCap")] public int ShadowedLightCap { get; set; } = 8;
+    /// <summary>Shadow/light region radius in chunks around the camera (4–6).</summary>
+    [JsonPropertyName("shadowRegionRadius")] public int ShadowRegionRadius { get; set; } = 5;
+
     [JsonIgnore] private string _path = "";
 
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true };

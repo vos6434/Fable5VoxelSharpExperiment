@@ -111,7 +111,9 @@ Three intertwined systems:
 ## Data / schema changes
 
 - Block JSON: optional `"lightColor": "#RRGGBB"` (default white; intensity
-  stays `lightEmission`). `data-format.md` updated; parsed in `Voxel.Shared`.
+  stays `lightEmission`). Parsed + validated in `Voxel.Shared`
+  (`BlockRegistry`); the web repo's `data-format.md` still needs the field
+  documented when the web client adopts it.
 - `data/environment/sun.png`, `moon.png` (gen-textures placeholders).
 
 ## Milestones
@@ -144,15 +146,62 @@ Three intertwined systems:
    re-uploads). World pass now 1.2-1.65 ms — still under the 4 ms budget.
 4. **Emitters + clusters** — registry, cluster lists, unshadowed colored
    point lights (lightColor JSON live here).
+   **DONE (2026-07-05).** `LightVolume` scans loaded chunks for emitters
+   (only blocks *exposed* to a non-opaque neighbor count, so buried lava
+   oceans don't flood the registry) and distributes them into an 8^3-block
+   cluster grid covering the occupancy region. GPU side is one RGBA32F 3D
+   texture, 9 depth slices per cluster column: 8 light slots (position +
+   color5:5:5/intensity4 packed as an exact-integer float — GL 3.3 has no
+   SSBOs and NaN-pattern bit packing through float textures is unsafe) plus
+   one **overflow slice**: evicted lights fold into an unshadowed per-cluster
+   color as planned. Rebuilds are change-driven (edit/stream/recenter),
+   debounced 0.2 s, and follow the occupancy volume's origin so recenters
+   stay atomic. `lightColor` parsed in `Voxel.Shared` (registry tests);
+   glowstone #FFD9A0, lava #FF7A2A. Emissive blocks render fullbright via a
+   +4.0 flag on the baked vertex brightness.
 5. **Block-light shadow rays** — capped shadowed lights per cluster; the
    money shot: a pillar between a torch and a wall casts a moving shadow
    when the torch is re-placed.
+   **DONE (2026-07-05).** Per-light DDA (≤ 30 steps) through the same
+   occupancy volume, using the derivative normal + 0.01-block bias from M3
+   and N·L per light (kills back-face leakage). The ray terminates when it
+   reaches the emitter's own voxel — emitting blocks are solid in the
+   occupancy volume and would otherwise shadow themselves. Verified at
+   midnight: glowstone column throws a warm pool with crisp dark shadows
+   behind adjacent dirt blocks.
 6. **Skylight + AO** — column openness, vertex AO, ambient curve; caves go
    properly dark at night.
+   **DONE (2026-07-05).** Composite reworked to
+   `albedo × shade × (ambientFloor + skyAmbient × skyVis + dirLight × N·L ×
+   shadowRay + Σ blockLights)` where `shade` = face brightness × vertex AO.
+   *Deviation:* column openness is a straight-up occupancy ray per fragment
+   (≤ 96 vertical texel steps, early-out on ceilings, skipped entirely when
+   sky ambient is ~0 e.g. hell) instead of the planned CPU per-column data —
+   reuses the existing volume, exact within the region, zero new CPU state.
+   Vertex AO is classic 3-neighbor corner occlusion baked in the greedy
+   mesher; the merge key now includes the 4 corner AO levels so rectangles
+   merge only when AO matches. Corner samples that would cross two chunk
+   boundaries read as air (pool ships face neighbors only) — invisible seam
+   in practice.
 7. **Night polish** — moon shadows, dusk grade, hell interplay (hell has no
    sun — ambient red floor).
+   **DONE (2026-07-05).** `SkyState` now exposes the shadow-casting
+   directional light: sun while up, else moon at the opposite azimuth with a
+   cool ~25% intensity; both fade through the horizon so dusk is lit by the
+   (already orange-graded) ambient alone. Hell: sky ambient and directional
+   light fade out with `hellT`, ambient floor lerps to a dim red — lava
+   emitters (via M4/M5) carry the scene. Verified: moonlit surface with
+   crisp moon shadows at 00:00, dusk grade at 17:36, hell at
+   (0, −140, 0) reads dim red with orange lava light pools.
 8. **Perf/quality tiers** — settings: shadowed-light cap (0/2/4/8), region
    size; fallback tier implemented here only if gate 3 failed.
+   **DONE (2026-07-05).** `settings.json`: `shadowedLightCap` (0/2/4/8,
+   default 8, cycles live from the F3 debug menu, persisted) and
+   `shadowRegionRadius` (chunks, 4–6, default 5, applied at startup to both
+   occupancy and light volumes). Gate 3 passed, so the CSM/flood-fill
+   fallback tier was never built. Measured world-pass GPU time with
+   everything on: 0.9–2.0 ms at 1080p (noon close-up with block lights
+   ~1.9 ms, hell ~0.4 ms since sun/sky terms skip) — inside the 4 ms budget.
 
 ## Verification
 

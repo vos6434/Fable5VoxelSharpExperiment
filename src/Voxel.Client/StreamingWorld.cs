@@ -57,7 +57,7 @@ public sealed class StreamingWorld : IDisposable
     {
         _gl = gl;
         _connection = connection;
-        _pool = new MesherPool(data.Blocks.Opaque, data.RenderTable, data.TranslucentMask);
+        _pool = new MesherPool(data.Blocks.Opaque, data.RenderTable, data.TranslucentMask, data.EmissiveMask);
     }
 
     public (int Loaded, int Rendered, int PendingMesh, int AwaitingNet, int Workers) Stats
@@ -87,10 +87,19 @@ public sealed class StreamingWorld : IDisposable
     /// <summary>Chunk coords edited since the last drain (occupancy volume re-uploads these).</summary>
     private readonly HashSet<(int, int, int)> _occupancyDirty = new();
 
+    /// <summary>Same edits, drained separately by the light volume (emitter rescan).</summary>
+    private readonly HashSet<(int, int, int)> _lightDirty = new();
+
     public void DrainOccupancyDirty(HashSet<(int, int, int)> into)
     {
         foreach (var key in _occupancyDirty) into.Add(key);
         _occupancyDirty.Clear();
+    }
+
+    public void DrainLightDirty(HashSet<(int, int, int)> into)
+    {
+        foreach (var key in _lightDirty) into.Add(key);
+        _lightDirty.Clear();
     }
 
     public void Update(double camX, double camY, double camZ)
@@ -160,6 +169,7 @@ public sealed class StreamingWorld : IDisposable
         if (blockId != 0) entry.Empty = false;
         MarkDirty(entry);
         _occupancyDirty.Add((cx, cy, cz)); // this chunk's occupancy changed
+        _lightDirty.Add((cx, cy, cz));
 
         void Touch(int ncx, int ncy, int ncz)
         {

@@ -21,17 +21,19 @@ namespace Voxel.Client;
 /// </summary>
 public sealed class OccupancyVolume : IDisposable
 {
-    private const int RegionRadiusChunks = 5;
-    private const int RegionChunks = RegionRadiusChunks * 2 + 1; // 11
     private const int S = Constants.ChunkSize;
-    public const int Size = RegionChunks * S; // 176 voxels per edge
+
+    private readonly int RegionRadiusChunks;
+    private readonly int RegionChunks;
+    /// <summary>Edge length in voxels (region size is a quality setting, plan 02 M8).</summary>
+    public int Size { get; }
 
     private readonly GL _gl;
     private readonly byte[] _opaque;
     private readonly uint _texture;
     private readonly byte[] _scratch = new byte[S * S * S];
     private readonly byte[] _zeroSlab = new byte[S * S * S];
-    private readonly byte[] _zero = new byte[Size * Size * Size];
+    private readonly byte[] _zero;
     private readonly (int Dx, int Dy, int Dz)[] _localChunks;
     private readonly HashSet<(int, int, int)> _uploaded = new();
     private readonly HashSet<(int, int, int)> _dirty = new();
@@ -39,10 +41,14 @@ public sealed class OccupancyVolume : IDisposable
     private (int X, int Y, int Z) _originChunk = (int.MinValue, 0, 0);
     private int _cursor;
 
-    public OccupancyVolume(GL gl, byte[] opaqueTable)
+    public OccupancyVolume(GL gl, byte[] opaqueTable, int regionRadiusChunks)
     {
         _gl = gl;
         _opaque = opaqueTable;
+        RegionRadiusChunks = regionRadiusChunks;
+        RegionChunks = regionRadiusChunks * 2 + 1;
+        Size = RegionChunks * S;
+        _zero = new byte[Size * Size * Size];
 
         // Region chunk offsets, sorted nearest-center-first so shadows near the
         // player fill in before the edges.
@@ -62,7 +68,7 @@ public sealed class OccupancyVolume : IDisposable
         unsafe
         {
             gl.TexImage3D(TextureTarget.Texture3D, 0, (int)InternalFormat.R8,
-                Size, Size, Size, 0, PixelFormat.Red, PixelType.UnsignedByte, null);
+                (uint)Size, (uint)Size, (uint)Size, 0, PixelFormat.Red, PixelType.UnsignedByte, null);
         }
         gl.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
         gl.TexParameter(TextureTarget.Texture3D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
@@ -74,6 +80,9 @@ public sealed class OccupancyVolume : IDisposable
     /// <summary>World min-corner of the volume (for the shader's uOccupancyOrigin).</summary>
     public (float X, float Y, float Z) OriginWorld =>
         (_originChunk.X * S, _originChunk.Y * S, _originChunk.Z * S);
+
+    /// <summary>Min-corner chunk coordinate (the light volume follows this).</summary>
+    public (int X, int Y, int Z) OriginChunk => _originChunk;
 
     public void Bind(TextureUnit unit)
     {
@@ -185,7 +194,7 @@ public sealed class OccupancyVolume : IDisposable
         _gl.BindTexture(TextureTarget.Texture3D, _texture);
         fixed (byte* p = _zero)
         {
-            _gl.TexSubImage3D(TextureTarget.Texture3D, 0, 0, 0, 0, Size, Size, Size,
+            _gl.TexSubImage3D(TextureTarget.Texture3D, 0, 0, 0, 0, (uint)Size, (uint)Size, (uint)Size,
                 PixelFormat.Red, PixelType.UnsignedByte, p);
         }
     }

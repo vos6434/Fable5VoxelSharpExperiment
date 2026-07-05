@@ -58,6 +58,8 @@ public sealed class GuiSystem : IDisposable
     public Func<(float SliderT, string TimeText, bool Paused)>? DebugState;
     public Action<float>? OnDebugTime;
     public Action<bool>? OnDebugPause;
+    public Func<int>? DebugLightCap;
+    public Action? OnDebugCycleLightCap;
 
     private (string Target, float OffX, float OffY)? _drag; // target = gui id or "hotbar"
     private bool _debugSliderDrag;
@@ -399,7 +401,7 @@ public sealed class GuiSystem : IDisposable
 
     private (float X, float Y, float W, float H) DebugPanel()
     {
-        const float w = 380, h = 168;
+        const float w = 380, h = 214;
         return (Math.Max(0, _screenW - w - 12), 12, w, h);
     }
 
@@ -413,6 +415,12 @@ public sealed class GuiSystem : IDisposable
     {
         var (px, py, pw, _) = DebugPanel();
         return (px + 16, py + 116, pw - 32, 36);
+    }
+
+    private (float X, float Y, float W, float H) DebugLightCapButton()
+    {
+        var (px, py, pw, _) = DebugPanel();
+        return (px + 16, py + 162, pw - 32, 36);
     }
 
     private bool HandleDebugClick(float x, float y)
@@ -429,6 +437,12 @@ public sealed class GuiSystem : IDisposable
         {
             bool paused = DebugState?.Invoke().Paused ?? false;
             OnDebugPause?.Invoke(!paused);
+            return true;
+        }
+        var (lx, ly, lw, lh) = DebugLightCapButton();
+        if (Inside(x, y, lx, ly, lw, lh))
+        {
+            OnDebugCycleLightCap?.Invoke();
             return true;
         }
         return true; // clicks on the panel background are consumed
@@ -467,6 +481,14 @@ public sealed class GuiSystem : IDisposable
         batch.BorderRect(bx, by, bw, bh, 2, 0.62f, 0.62f, 0.62f, 1f);
         string label = $"[{(paused ? "x" : " ")}] Pause time";
         font.DrawShadowed(batch, bx + (bw - font.Measure(label)) / 2, by + (bh - font.LineHeight) / 2, label);
+
+        // Quality knob (plan 02 M8): shadowed block lights per cluster.
+        var (lx, ly, lw, lh) = DebugLightCapButton();
+        bool hoverCap = Inside(_mouseX, _mouseY, lx, ly, lw, lh) && !PauseVisible;
+        batch.SolidRect(lx, ly, lw, lh, hoverCap ? 0.5f : 0.42f, hoverCap ? 0.5f : 0.42f, hoverCap ? 0.5f : 0.42f, 1f);
+        batch.BorderRect(lx, ly, lw, lh, 2, 0.62f, 0.62f, 0.62f, 1f);
+        string capLabel = $"Shadowed block lights: {DebugLightCap?.Invoke() ?? 0}";
+        font.DrawShadowed(batch, lx + (lw - font.Measure(capLabel)) / 2, ly + (lh - font.LineHeight) / 2, capLabel);
     }
 
     // ---- pause menu -------------------------------------------------------------

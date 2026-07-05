@@ -22,6 +22,8 @@ public sealed class ClientData
     public required ushort[] RenderTable { get; init; }
     /// <summary>translucentMask[numericId] = 1 for alpha-blended blocks (water, ice).</summary>
     public required byte[] TranslucentMask { get; init; }
+    /// <summary>emissiveMask[numericId] = 1 for light-emitting blocks (rendered fullbright).</summary>
+    public required byte[] EmissiveMask { get; init; }
 
     public static ClientData Load(string dataRoot)
     {
@@ -63,10 +65,12 @@ public sealed class ClientData
 
         var renderTable = new ushort[blocks.Count * 6];
         var translucentMask = new byte[blocks.Count];
+        var emissiveMask = new byte[blocks.Count];
         foreach (var def in blocks.Defs)
         {
             if (def.NumericId == 0) continue;
             translucentMask[def.NumericId] = (byte)(def.Transparency == Transparency.Translucent ? 1 : 0);
+            emissiveMask[def.NumericId] = (byte)(def.LightEmission > 0 ? 1 : 0);
             foreach (var face in faceDirs)
             {
                 renderTable[def.NumericId * 6 + (int)face] = (ushort)layerByName[def.FaceTexture(face)];
@@ -81,6 +85,7 @@ public sealed class ClientData
             LayerCount = textureNames.Count,
             RenderTable = renderTable,
             TranslucentMask = translucentMask,
+            EmissiveMask = emissiveMask,
         };
     }
 }

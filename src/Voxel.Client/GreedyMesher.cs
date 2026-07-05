@@ -4,13 +4,22 @@ namespace Voxel.Client;
 
 /// <summary>
 /// Greedy mesher with cross-chunk face culling — logic-identical port of the
-/// web client's greedy.ts. For each of the 6 face directions it sweeps
-/// slices, builds a visibility mask, and merges equal cells into maximal
-/// rectangles. UVs are world-anchored (one unit per block) and wrap inside
-/// the texture-array layer, so merged quads tile seamlessly.
+/// web client's greedy.ts, extended with baked vertex AO (plan 02 M6). For
+/// each of the 6 face directions it sweeps slices, builds a visibility mask,
+/// and merges equal cells into maximal rectangles. UVs are world-anchored
+/// (one unit per block) and wrap inside the texture-array layer, so merged
+/// quads tile seamlessly.
+///
+/// AO: classic 3-neighbor corner occlusion sampled in the layer the face
+/// looks into, baked into the per-vertex brightness. The merge key includes
+/// the cell's 4 corner AO levels so greedy rectangles stay correct (cells
+/// only merge when their corner AO matches). Corner samples that would cross
+/// two chunk boundaries at once read as air (the pool only ships the 6 face
+/// neighbors) — a subtle AO seam on chunk corners, invisible in practice.
 ///
 /// Output is interleaved vertex data: position(3) uv(2) meta(2), where meta
-/// is (atlas layer, face brightness).
+/// is (atlas layer, face brightness × AO). Light-emitting blocks get +4.0
+/// added to meta.y — the fragment shader renders those faces fullbright.
 /// </summary>
 public sealed class MeshPass
 {
@@ -29,6 +38,9 @@ public static class GreedyMesher
     // Per-face brightness, FACE_DIRS order (px, nx, py, ny, pz, nz):
     // classic voxel shading — top brightest, bottom darkest.
     private static readonly float[] FaceBrightness = [0.6f, 0.6f, 1.0f, 0.5f, 0.8f, 0.8f];
+
+    // Brightness multiplier per corner AO level (0 = fully occluded corner).
+    private static readonly float[] AoFactor = [0.55f, 0.72f, 0.86f, 1.0f];
 
     private readonly record struct Sweep(int D, int Dir, int FaceIndex, int U, int V, bool Flip);
 
@@ -50,13 +62,13 @@ public static class GreedyMesher
         public void Quad(
             Span<float> c0, Span<float> c1, Span<float> c2, Span<float> c3,
             float u0, float v0, float u1, float v1,
-            float layer, float brightness, bool flip)
+            float layer, Span<float> brightness, bool flip)
         {
             uint baseIndex = (uint)(Vertices.Count / 7);
-            AddVertex(c0, u0, v0, layer, brightness);
-            AddVertex(c1, u1, v0, layer, brightness);
-            AddVertex(c2, u1, v1, layer, brightness);
-            AddVertex(c3, u0, v1, layer, brightness);
+            AddVertex(c0, u0, v0, layer, brightness[0]);
+            AddVertex(c1, u1, v0, layer, brightness[1]);
+            AddVertex(c2, u1, v1, layer, brightness[2]);
+            AddVertex(c3, u0, v1, layer, brightness[3]);
             if (flip)
             {
                 Indices.AddRange([baseIndex, baseIndex + 2, baseIndex + 1, baseIndex, baseIndex + 3, baseIndex + 2]);
@@ -85,14 +97,19 @@ public static class GreedyMesher
         ushort[]?[] neighbors,
         byte[] opaque,
         ushort[] renderTable,
-        byte[] translucentMask)
+        byte[] translucentMask,
+        byte[] emissiveMask)
     {
         ushort[]? nPx = neighbors[0], nNx = neighbors[1], nPy = neighbors[2];
         ushort[]? nNy = neighbors[3], nPz = neighbors[4], nNz = neighbors[5];
 
-        // Voxel lookup that reaches one block into neighbor chunks along one axis.
+        // Voxel lookup that reaches one block into neighbor chunks along one
+        // axis. AO corner samples can step outside on two axes at once; the
+        // pool only has face neighbors, so those read as air.
         ushort Voxel(int x, int y, int z)
         {
+            int outside = (x < 0 || x >= S ? 1 : 0) + (y < 0 || y >= S ? 1 : 0) + (z < 0 || z >= S ? 1 : 0);
+            if (outside > 1) return 0;
             if (x >= S) return nPx?[ChunkData.Index(x - S, y, z)] ?? 0;
             if (x < 0) return nNx?[ChunkData.Index(x + S, y, z)] ?? 0;
             if (y >= S) return nPy?[ChunkData.Index(x, y - S, z)] ?? 0;
@@ -104,18 +121,36 @@ public static class GreedyMesher
 
         var solid = new PassBuilder();
         var translucent = new PassBuilder();
-        var mask = new ushort[S * S];
+        // Merge key per cell: block id (16 bits) | packed corner AO (8 bits).
+        var mask = new uint[S * S];
+        var apos = new int[3]; // scratch for CornerAo (locals can't capture spans)
         Span<int> pos = stackalloc int[3];
         Span<float> c0 = stackalloc float[3];
         Span<float> c1 = stackalloc float[3];
         Span<float> c2 = stackalloc float[3];
         Span<float> c3 = stackalloc float[3];
+        Span<float> brightness4 = stackalloc float[4];
 
         foreach (var sweep in Sweeps)
         {
             (int d, int dir, int faceIndex, int u, int v, bool flip) =
                 (sweep.D, sweep.Dir, sweep.FaceIndex, sweep.U, sweep.V, sweep.Flip);
             float brightness = FaceBrightness[faceIndex];
+
+            // One corner AO level (0..3) from the two edge neighbors + the
+            // diagonal, all sampled in the layer the face looks into.
+            int CornerAo(int mu, int mv, int slice, int su, int sv)
+            {
+                apos[d] = slice + dir;
+                apos[u] = mu + su; apos[v] = mv;
+                bool side1 = opaque[Voxel(apos[0], apos[1], apos[2])] == 1;
+                apos[u] = mu; apos[v] = mv + sv;
+                bool side2 = opaque[Voxel(apos[0], apos[1], apos[2])] == 1;
+                apos[u] = mu + su; apos[v] = mv + sv;
+                bool corner = opaque[Voxel(apos[0], apos[1], apos[2])] == 1;
+                if (side1 && side2) return 0;
+                return 3 - ((side1 ? 1 : 0) + (side2 ? 1 : 0) + (corner ? 1 : 0));
+            }
 
             for (int slice = 0; slice < S; slice++)
             {
@@ -128,15 +163,22 @@ public static class GreedyMesher
                     {
                         pos[d] = slice; pos[u] = mu; pos[v] = mv;
                         ushort id = blocks[ChunkData.Index(pos[0], pos[1], pos[2])];
-                        ushort visible = 0;
+                        uint cell = 0;
                         if (id != 0)
                         {
                             pos[d] = slice + dir;
                             ushort nb = Voxel(pos[0], pos[1], pos[2]);
-                            if (opaque[nb] != 1 && nb != id) visible = id;
+                            if (opaque[nb] != 1 && nb != id)
+                            {
+                                int ao00 = CornerAo(mu, mv, slice, -1, -1);
+                                int ao10 = CornerAo(mu, mv, slice, +1, -1);
+                                int ao11 = CornerAo(mu, mv, slice, +1, +1);
+                                int ao01 = CornerAo(mu, mv, slice, -1, +1);
+                                cell = id | (uint)((ao00 | ao10 << 2 | ao11 << 4 | ao01 << 6) << 16);
+                            }
                         }
-                        mask[mv * S + mu] = visible;
-                        if (visible != 0) anyVisible = true;
+                        mask[mv * S + mu] = cell;
+                        if (cell != 0) anyVisible = true;
                     }
                 }
                 if (!anyVisible) continue;
@@ -146,18 +188,19 @@ public static class GreedyMesher
                 {
                     for (int mu = 0; mu < S; mu++)
                     {
-                        ushort id = mask[mv * S + mu];
-                        if (id == 0) continue;
+                        uint cell = mask[mv * S + mu];
+                        if (cell == 0) continue;
+                        ushort id = (ushort)(cell & 0xFFFF);
 
                         int w = 1;
-                        while (mu + w < S && mask[mv * S + mu + w] == id) w++;
+                        while (mu + w < S && mask[mv * S + mu + w] == cell) w++;
                         int h = 1;
                         while (mv + h < S)
                         {
                             bool rowMatches = true;
                             for (int k = 0; k < w; k++)
                             {
-                                if (mask[(mv + h) * S + mu + k] != id) { rowMatches = false; break; }
+                                if (mask[(mv + h) * S + mu + k] != cell) { rowMatches = false; break; }
                             }
                             if (!rowMatches) break;
                             h++;
@@ -175,11 +218,20 @@ public static class GreedyMesher
                         SetCorner(c2, d, plane, u, mu + w, v, mv + h);
                         SetCorner(c3, d, plane, u, mu, v, mv + h);
 
+                        // Per-corner brightness = face shade × corner AO, +4.0
+                        // emissive flag (shader renders those fullbright).
+                        uint ao = cell >> 16;
+                        float emissive = emissiveMask[id] == 1 ? 4f : 0f;
+                        brightness4[0] = brightness * AoFactor[ao & 3] + emissive;
+                        brightness4[1] = brightness * AoFactor[(ao >> 2) & 3] + emissive;
+                        brightness4[2] = brightness * AoFactor[(ao >> 4) & 3] + emissive;
+                        brightness4[3] = brightness * AoFactor[(ao >> 6) & 3] + emissive;
+
                         var target = translucentMask[id] == 1 ? translucent : solid;
                         target.Quad(
                             c0, c1, c2, c3,
                             mu, mv, mu + w, mv + h,
-                            renderTable[id * 6 + faceIndex], brightness, flip);
+                            renderTable[id * 6 + faceIndex], brightness4, flip);
                     }
                 }
             }

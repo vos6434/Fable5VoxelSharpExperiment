@@ -4,6 +4,7 @@
   "textures": { "all": "lava.png" },
   "hardness": -1,
   "lightEmission": 15,
+  "lightColor": "#FF7A2A",
   "collision": "liquid",
   "sounds": "liquid",
   "drops": [],
