@@ -68,6 +68,7 @@ public sealed class GameServer
         }
         _physics.SetTerrainSource(
             (cx, cy, cz) => { lock (_worldLock) return (ushort[])_store.Load(cx, cy, cz).Blocks.Clone(); },
+            GetWorldBlock, // cheap single-block read for buoyancy (no chunk clone)
             collides);
         _physics.SetWaterTable(water);
         _physics.OnGrabReleased = clientId =>

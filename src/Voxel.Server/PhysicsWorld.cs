@@ -59,10 +59,14 @@ public sealed partial class PhysicsWorld : IDisposable
             new SolveDescription(velocityIterationCount: 6, substepCount: 1));
     }
 
-    /// <summary>Wires the terrain source: a thread-safe chunk-blocks fetch + the "is solid" table.</summary>
-    public void SetTerrainSource(Func<int, int, int, ushort[]?> getChunk, byte[] collidesTable)
+    /// <summary>Cheap single-block world read (no chunk clone) for buoyancy's water scan.</summary>
+    private Func<int, int, int, ushort>? _getBlock;
+
+    /// <summary>Wires the terrain source: a thread-safe chunk-blocks fetch, a cheap single-block read, and the "is solid" table.</summary>
+    public void SetTerrainSource(Func<int, int, int, ushort[]?> getChunk, Func<int, int, int, ushort> getBlock, byte[] collidesTable)
     {
         _getChunk = getChunk;
+        _getBlock = getBlock;
         _collides = collidesTable;
     }
 

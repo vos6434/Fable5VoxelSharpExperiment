@@ -169,16 +169,9 @@ public sealed partial class PhysicsWorld
 
     private bool IsWaterBlock(int wx, int wy, int wz)
     {
-        ushort id = GetWorldBlock(wx, wy, wz);
+        // Single-block read (no chunk clone) — the water-surface scan touches up
+        // to ~48 blocks per column, so cloning a chunk per block would churn the GC.
+        ushort id = _getBlock is not null ? _getBlock(wx, wy, wz) : (ushort)0;
         return id != 0 && id < _water.Length && _water[id] != 0;
-    }
-
-    private ushort GetWorldBlock(int wx, int wy, int wz)
-    {
-        ushort[]? chunk = _getChunk!(
-            Coords.WorldToChunk(wx), Coords.WorldToChunk(wy), Coords.WorldToChunk(wz));
-        if (chunk is null) return 0;
-        return chunk[ChunkData.Index(
-            Coords.WorldToLocal(wx), Coords.WorldToLocal(wy), Coords.WorldToLocal(wz))];
     }
 }
