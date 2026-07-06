@@ -263,61 +263,62 @@ public sealed class EntityRenderer : IDisposable
     }
 
     /// <summary>
-    /// Enclosed hull columns for the water lid: a 2D flood-fill over the footprint (a column is a
-    /// "wall" if it holds any block) marks columns reachable from the grid edge as open sea; the
-    /// unreached empty columns are the hull interior. Deck height is one above the shortest wall
-    /// bordering that interior, so a tall mast doesn't lift the lid. Null when nothing is enclosed.
+    /// Hull-interior columns for the water lid. A "wall" column holds any block; an empty column
+    /// is interior when it lies between hull walls on both axes (a wall somewhere to its -X and
+    /// +X, and to its -Z and +Z). This silhouette fill tolerates gaps in the hull line — a
+    /// pointed bow or a doorway no longer disables the whole lid the way strict enclosure did.
+    /// Deck height is one above the shortest wall (a tall mast never lifts the lid). Null when the
+    /// footprint encloses nothing (open raft, or a solid-floored hull with no empty columns).
     /// </summary>
     public static (bool[] Interior, int DeckY)? ComputeInteriorColumns(ushort[] blocks, int dimX, int dimY, int dimZ)
     {
         int n = dimX * dimZ;
         var wall = new bool[n];
-        var top = new int[n];
-        Array.Fill(top, -1);
+        int deckTop = int.MaxValue;
         for (int z = 0; z < dimZ; z++)
         for (int x = 0; x < dimX; x++)
         for (int y = 0; y < dimY; y++)
-            if (blocks[(y * dimZ + z) * dimX + x] != 0) { wall[z * dimX + x] = true; top[z * dimX + x] = y; }
-
-        var exterior = new bool[n];
-        var queue = new Queue<int>();
-        void Seed(int x, int z) { int c = z * dimX + x; if (!wall[c] && !exterior[c]) { exterior[c] = true; queue.Enqueue(c); } }
-        for (int x = 0; x < dimX; x++) { Seed(x, 0); Seed(x, dimZ - 1); }
-        for (int z = 0; z < dimZ; z++) { Seed(0, z); Seed(dimX - 1, z); }
-
-        int[] ox = [1, -1, 0, 0], oz = [0, 0, 1, -1];
-        while (queue.Count > 0)
-        {
-            int c = queue.Dequeue();
-            int cx = c % dimX, cz = c / dimX;
-            for (int k = 0; k < 4; k++)
+            if (blocks[(y * dimZ + z) * dimX + x] != 0)
             {
-                int nx = cx + ox[k], nz = cz + oz[k];
-                if (nx < 0 || nz < 0 || nx >= dimX || nz >= dimZ) continue;
-                Seed(nx, nz);
+                wall[z * dimX + x] = true;
+                deckTop = Math.Min(deckTop, TopSolidY(blocks, dimX, dimY, dimZ, x, z));
+                break; // this column is a wall; TopSolidY scans its full height once
             }
+
+        // Per-row X span and per-column Z span of the hull walls.
+        var rowMinX = new int[dimZ]; var rowMaxX = new int[dimZ];
+        var colMinZ = new int[dimX]; var colMaxZ = new int[dimX];
+        Array.Fill(rowMinX, int.MaxValue); Array.Fill(rowMaxX, int.MinValue);
+        Array.Fill(colMinZ, int.MaxValue); Array.Fill(colMaxZ, int.MinValue);
+        for (int z = 0; z < dimZ; z++)
+        for (int x = 0; x < dimX; x++)
+        {
+            if (!wall[z * dimX + x]) continue;
+            if (x < rowMinX[z]) rowMinX[z] = x; if (x > rowMaxX[z]) rowMaxX[z] = x;
+            if (z < colMinZ[x]) colMinZ[x] = z; if (z > colMaxZ[x]) colMaxZ[x] = z;
         }
 
         var interior = new bool[n];
         bool any = false;
-        int deckTop = int.MaxValue;
         for (int z = 0; z < dimZ; z++)
         for (int x = 0; x < dimX; x++)
         {
-            int c = z * dimX + x;
-            if (wall[c] || exterior[c]) continue;
-            interior[c] = true;
-            any = true;
-            for (int k = 0; k < 4; k++)
+            if (wall[z * dimX + x]) continue;
+            if (x > rowMinX[z] && x < rowMaxX[z] && z > colMinZ[x] && z < colMaxZ[x])
             {
-                int nx = x + ox[k], nz = z + oz[k];
-                if (nx < 0 || nz < 0 || nx >= dimX || nz >= dimZ) continue;
-                int nc = nz * dimX + nx;
-                if (wall[nc] && top[nc] >= 0) deckTop = Math.Min(deckTop, top[nc]);
+                interior[z * dimX + x] = true;
+                any = true;
             }
         }
         if (!any) return null;
         return (interior, deckTop == int.MaxValue ? dimY : deckTop + 1);
+    }
+
+    private static int TopSolidY(ushort[] blocks, int dimX, int dimY, int dimZ, int x, int z)
+    {
+        for (int y = dimY - 1; y >= 0; y--)
+            if (blocks[(y * dimZ + z) * dimX + x] != 0) return y;
+        return -1;
     }
 
     public void Dispose()

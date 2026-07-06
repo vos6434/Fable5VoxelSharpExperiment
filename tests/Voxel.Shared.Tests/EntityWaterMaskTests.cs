@@ -43,8 +43,9 @@ public class EntityWaterMaskTests
     }
 
     [Fact]
-    public void Ring_with_a_gap_encloses_nothing()
+    public void Ring_with_a_gap_still_masks_the_interior()
     {
+        // A doorway / open bow must not disable the lid — real hulls aren't watertight rings.
         const int dx = 5, dy = 1, dz = 5;
         var blocks = Grid(dx, dy, dz, (x, y, z, b) =>
         {
@@ -52,10 +53,15 @@ public class EntityWaterMaskTests
             for (int xx = 0; xx < dx; xx++)
                 if (xx == 0 || xx == dx - 1 || zz == 0 || zz == dz - 1)
                     b[(0 * dz + zz) * dx + xx] = P;
-            b[(0 * dz + 0) * dx + 2] = 0; // punch a hole in the wall -> interior leaks to the sea
+            b[(0 * dz + 0) * dx + 2] = 0; // punch a hole in the front wall
         });
 
-        Assert.Null(EntityRenderer.ComputeInteriorColumns(blocks, dx, dy, dz));
+        var result = EntityRenderer.ComputeInteriorColumns(blocks, dx, dy, dz);
+        Assert.NotNull(result);
+        var (interior, _) = result.Value;
+        // The cells flanking the gap are still filled (walls on both sides on both axes).
+        Assert.True(interior[1 * dx + 1], "cell beside the gap should still be masked");
+        Assert.True(interior[2 * dx + 3], "interior away from the gap should be masked");
     }
 
     [Fact]
