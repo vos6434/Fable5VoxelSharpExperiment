@@ -236,12 +236,19 @@ public sealed class GameServer
     private void SyncGlueSelection(Client client) =>
         client.Outbox.Writer.TryWrite(Protocol.EncodeGlueSelection(client.GlueCorner1, client.GlueCorner2));
 
+    /// <summary>Bounds the selection scan (block reads generate chunks); far-apart corners would otherwise hang the server.</summary>
+    private const long MaxGlueBoxVolume = 64_000;
+
     private List<(int X, int Y, int Z)> CollectGlueBox((int X, int Y, int Z) c1, (int X, int Y, int Z) c2)
     {
         int minX = Math.Min(c1.X, c2.X), maxX = Math.Max(c1.X, c2.X);
         int minY = Math.Min(c1.Y, c2.Y), maxY = Math.Max(c1.Y, c2.Y);
         int minZ = Math.Min(c1.Z, c2.Z), maxZ = Math.Max(c1.Z, c2.Z);
         var marks = new List<(int X, int Y, int Z)>();
+
+        long volume = (long)(maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1);
+        if (volume > MaxGlueBoxVolume) return marks; // too large — empty, activation no-ops
+
         for (int y = minY; y <= maxY; y++)
         for (int z = minZ; z <= maxZ; z++)
         for (int x = minX; x <= maxX; x++)
