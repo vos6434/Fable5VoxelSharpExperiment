@@ -755,6 +755,14 @@ public sealed class Game
         // matrix. Drawn in the opaque phase for correct depth vs translucency.
         draws += _entities.Count;
         _entities.Render(_shader);
+
+        // Water mask: stamp each contraption's enclosed-hull lid into depth only (no color),
+        // so the world-water surface below is occluded and doesn't show through an open deck.
+        _gl.ColorMask(false, false, false, false);
+        _gl.Disable(EnableCap.CullFace);
+        _gl.DepthMask(true);
+        _entities.RenderWaterMask(_shader);
+        _gl.ColorMask(true, true, true, true);
         _shader.SetMatrix("uModel", IdentityMat); // restore for the chunk liquid/translucent passes
 
         // Liquid surfaces (water/lava tops): alpha blend with depth writes.
