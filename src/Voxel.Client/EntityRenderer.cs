@@ -241,22 +241,43 @@ public sealed class EntityRenderer : IDisposable
         return new MeshPass { Vertices = [.. verts], Indices = [.. indices] };
     }
 
-    /// <summary>Horizontal lid quads over each enclosed hull column, at deck height (local space).</summary>
+    /// <summary>
+    /// Depth-only plug filling each enclosed hull column from the grid bottom up to deck height.
+    /// A solid volume (not a single plane) so the world water below is occluded from any viewing
+    /// angle, not just straight overhead. Only the outward faces of the interior region are
+    /// emitted (a face is skipped where the neighbouring column is also interior), keeping the
+    /// mesh to the hull's inner shell.
+    /// </summary>
     private static MeshPass? BuildWaterMask(ushort[] blocks, int dimX, int dimY, int dimZ)
     {
         if (ComputeInteriorColumns(blocks, dimX, dimY, dimZ) is not var (interior, deckY)) return null;
 
         var verts = new List<float>();
         var indices = new List<uint>();
+        bool Inside(int x, int z) => x >= 0 && z >= 0 && x < dimX && z < dimZ && interior[z * dimX + x];
+
+        // Face corner layouts for a [x..x+1] x [0..deckY] x [z..z+1] box (pos only; color masked).
+        void Quad(float ax, float ay, float az, float bx, float by, float bz,
+                  float cx, float cy, float cz, float dxp, float dyp, float dzp)
+        {
+            uint b = (uint)(verts.Count / 7);
+            verts.AddRange([ax, ay, az, 0f, 0f, 0f, 1f]);
+            verts.AddRange([bx, by, bz, 0f, 0f, 0f, 1f]);
+            verts.AddRange([cx, cy, cz, 0f, 0f, 0f, 1f]);
+            verts.AddRange([dxp, dyp, dzp, 0f, 0f, 0f, 1f]);
+            indices.AddRange([b, b + 1, b + 2, b, b + 2, b + 3]);
+        }
+
         for (int z = 0; z < dimZ; z++)
         for (int x = 0; x < dimX; x++)
         {
             if (!interior[z * dimX + x]) continue;
-            uint b = (uint)(verts.Count / 7);
-            // pos(3), uv(2), layer, brightness — only position matters (color is masked off).
-            void V(int px, int pz) => verts.AddRange([px, deckY, pz, 0f, 0f, 0f, 1f]);
-            V(x, z); V(x + 1, z); V(x + 1, z + 1); V(x, z + 1);
-            indices.AddRange([b, b + 1, b + 2, b, b + 2, b + 3]);
+            float x0 = x, x1 = x + 1, z0 = z, z1 = z + 1, y0 = 0, y1 = deckY;
+            Quad(x0, y1, z0, x1, y1, z0, x1, y1, z1, x0, y1, z1);          // top (always)
+            if (!Inside(x - 1, z)) Quad(x0, y0, z1, x0, y1, z1, x0, y1, z0, x0, y0, z0); // -X
+            if (!Inside(x + 1, z)) Quad(x1, y0, z0, x1, y1, z0, x1, y1, z1, x1, y0, z1); // +X
+            if (!Inside(x, z - 1)) Quad(x0, y0, z0, x0, y1, z0, x1, y1, z0, x1, y0, z0); // -Z
+            if (!Inside(x, z + 1)) Quad(x1, y0, z1, x1, y1, z1, x0, y1, z1, x0, y0, z1); // +Z
         }
         if (indices.Count == 0) return null;
         return new MeshPass { Vertices = [.. verts], Indices = [.. indices] };
@@ -267,23 +288,30 @@ public sealed class EntityRenderer : IDisposable
     /// is interior when it lies between hull walls on both axes (a wall somewhere to its -X and
     /// +X, and to its -Z and +Z). This silhouette fill tolerates gaps in the hull line — a
     /// pointed bow or a doorway no longer disables the whole lid the way strict enclosure did.
-    /// Deck height is one above the shortest wall (a tall mast never lifts the lid). Null when the
-    /// footprint encloses nothing (open raft, or a solid-floored hull with no empty columns).
+    /// Deck height is one above the *most common* wall-top: a low bow step or a tall single-column
+    /// mast is outvoted by the hull's dominant course. Null when the footprint encloses nothing
+    /// (open raft, or a solid-floored hull with no empty columns).
     /// </summary>
     public static (bool[] Interior, int DeckY)? ComputeInteriorColumns(ushort[] blocks, int dimX, int dimY, int dimZ)
     {
         int n = dimX * dimZ;
         var wall = new bool[n];
-        int deckTop = int.MaxValue;
+        var topCounts = new Dictionary<int, int>();
         for (int z = 0; z < dimZ; z++)
         for (int x = 0; x < dimX; x++)
         for (int y = 0; y < dimY; y++)
             if (blocks[(y * dimZ + z) * dimX + x] != 0)
             {
                 wall[z * dimX + x] = true;
-                deckTop = Math.Min(deckTop, TopSolidY(blocks, dimX, dimY, dimZ, x, z));
+                int top = TopSolidY(blocks, dimX, dimY, dimZ, x, z);
+                topCounts[top] = topCounts.GetValueOrDefault(top) + 1;
                 break; // this column is a wall; TopSolidY scans its full height once
             }
+
+        // Deck = one above the most frequent wall-top (ties -> the taller one, more freeboard).
+        int deckTop = -1, bestCount = 0;
+        foreach (var (top, count) in topCounts)
+            if (count > bestCount || (count == bestCount && top > deckTop)) { deckTop = top; bestCount = count; }
 
         // Per-row X span and per-column Z span of the hull walls.
         var rowMinX = new int[dimZ]; var rowMaxX = new int[dimZ];
@@ -311,7 +339,7 @@ public sealed class EntityRenderer : IDisposable
             }
         }
         if (!any) return null;
-        return (interior, deckTop == int.MaxValue ? dimY : deckTop + 1);
+        return (interior, deckTop < 0 ? dimY : deckTop + 1);
     }
 
     private static int TopSolidY(ushort[] blocks, int dimX, int dimY, int dimZ, int x, int z)
