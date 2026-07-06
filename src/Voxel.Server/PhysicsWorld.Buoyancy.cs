@@ -46,9 +46,10 @@ public sealed partial class PhysicsWorld
     }
 
     /// <summary>
-    /// Net lift from average wet fraction across all solid blocks (dry upper hull no longer
-    /// sinks the whole contraption). Impulse is scaled by body mass and applied at the
-    /// submerged-volume centroid for righting torque when tilted.
+    /// Net lift from displaced volume vs. weight. Displacement includes both solid blocks and
+    /// the air enclosed above a hull floor (a boat floats on its trapped air, not just its
+    /// planks), while weight is proportional to the solid-block count only. Impulse is scaled by
+    /// body mass and applied at the submerged-volume centroid for righting torque when tilted.
     /// </summary>
     private bool TryApplyBuoyancy(Entity entity, BodyReference body, float dt, out float submergedRatio)
     {
@@ -62,19 +63,25 @@ public sealed partial class PhysicsWorld
         int solidBlocks = 0;
         Vector3 weighted = Vector3.Zero;
         float weightTotal = 0f;
-        for (int y = 0; y < dimY; y++)
         for (int z = 0; z < dimZ; z++)
         for (int x = 0; x < dimX; x++)
         {
-            if (entity.Blocks[(y * dimZ + z) * dimX + x] == 0) continue;
-            solidBlocks++;
-            var local = new Vector3(x + 0.5f, y + 0.5f, z + 0.5f) - pivot;
-            var world = Vector3.Transform(local, rot) + pos;
-            float sub = BlockSubmergence(world);
-            submergedSum += sub;
-            if (sub <= 0f) continue;
-            weighted += world * sub;
-            weightTotal += sub;
+            // Scan the column bottom-up: air only displaces once a solid floor sits below it,
+            // so an open-bottomed hull floods (no lift) but a hull with a floor traps air.
+            bool solidBelow = false;
+            for (int y = 0; y < dimY; y++)
+            {
+                bool solid = entity.Blocks[(y * dimZ + z) * dimX + x] != 0;
+                if (!solid && !solidBelow) continue;
+                var local = new Vector3(x + 0.5f, y + 0.5f, z + 0.5f) - pivot;
+                var world = Vector3.Transform(local, rot) + pos;
+                float sub = BlockSubmergence(world);
+                submergedSum += sub;
+                if (solid) { solidBlocks++; solidBelow = true; }
+                if (sub <= 0f) continue;
+                weighted += world * sub;
+                weightTotal += sub;
+            }
         }
 
         if (solidBlocks == 0 || submergedSum <= 0f) return false;
@@ -87,41 +94,57 @@ public sealed partial class PhysicsWorld
         return true;
     }
 
-    /// <summary>Gentle draft spring using solid-block vertical extent (ignores hollow air).</summary>
+    /// <summary>
+    /// Gentle draft spring toward the equilibrium waterline. The target draft is the *average*
+    /// hull depth per footprint column times the density, so a tall mast (a single column) no
+    /// longer inflates the target and drags the whole hull under.
+    /// </summary>
     private void ApplyHeightSpring(Entity entity, BodyReference body, float submerged, float dt)
     {
         var pos = body.Pose.Position;
         if (!TryGetWaterSurface((int)MathF.Floor(pos.X), (int)MathF.Floor(pos.Z), out float surface)) return;
-        if (!TryGetSolidVerticalExtent(entity, body, out float solidMinY, out float solidMaxY)) return;
+        if (!TryGetHullMetrics(entity, body, out float solidMinY, out float averageDepth)) return;
 
-        float hullHeight = MathF.Max(0.5f, solidMaxY - solidMinY);
-        float targetMinY = surface - hullHeight * RelativeBlockDensity;
+        float targetMinY = surface - averageDepth * RelativeBlockDensity;
         float error = targetMinY - solidMinY;
         float vy = body.Velocity.Linear.Y;
         body.Velocity.Linear += Vector3.UnitY * ((HeightSpring * error - HeightDamp * vy) * submerged * dt);
     }
 
-    private static bool TryGetSolidVerticalExtent(Entity entity, BodyReference body, out float minY, out float maxY)
+    /// <summary>Lowest solid world-Y and the mean hull depth (solid + trapped air) per occupied column.</summary>
+    private static bool TryGetHullMetrics(Entity entity, BodyReference body, out float minY, out float averageDepth)
     {
         minY = float.MaxValue;
-        maxY = float.MinValue;
+        averageDepth = 0f;
         var pivot = entity.Pivot;
         var rot = body.Pose.Orientation;
         var pos = body.Pose.Position;
         int dimX = entity.DimX, dimY = entity.DimY, dimZ = entity.DimZ;
 
-        for (int y = 0; y < dimY; y++)
+        int hullCells = 0, columns = 0;
         for (int z = 0; z < dimZ; z++)
         for (int x = 0; x < dimX; x++)
         {
-            if (entity.Blocks[(y * dimZ + z) * dimX + x] == 0) continue;
-            var local = new Vector3(x + 0.5f, y + 0.5f, z + 0.5f) - pivot;
-            float wy = (Vector3.Transform(local, rot) + pos).Y;
-            minY = MathF.Min(minY, wy - 0.5f);
-            maxY = MathF.Max(maxY, wy + 0.5f);
+            bool solidBelow = false;
+            int columnCells = 0;
+            for (int y = 0; y < dimY; y++)
+            {
+                bool solid = entity.Blocks[(y * dimZ + z) * dimX + x] != 0;
+                if (!solid && !solidBelow) continue;
+                columnCells++;
+                if (!solid) continue;
+                solidBelow = true;
+                float wy = (Vector3.Transform(new Vector3(x + 0.5f, y + 0.5f, z + 0.5f) - pivot, rot) + pos).Y;
+                minY = MathF.Min(minY, wy - 0.5f);
+            }
+            if (columnCells == 0) continue;
+            hullCells += columnCells;
+            columns++;
         }
 
-        return minY < maxY;
+        if (columns == 0) return false;
+        averageDepth = MathF.Max(0.5f, (float)hullCells / columns);
+        return true;
     }
 
     /// <summary>PD torque: level grid +Y toward world up without overshooting.</summary>
