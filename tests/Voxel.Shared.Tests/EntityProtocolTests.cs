@@ -86,6 +86,17 @@ public class EntityProtocolTests
     }
 
     [Fact]
+    public void EntityBlock_round_trips()
+    {
+        byte[] encoded = Protocol.EncodeEntityBlock(42, -3, 10, 7, 5);
+        Assert.Equal(Msg.EntityBlock, Protocol.TypeOf(encoded));
+        var d = Protocol.DecodeEntityBlock(encoded);
+        Assert.Equal(42u, d.EntityId);
+        Assert.Equal((-3, 10, 7), (d.LocalX, d.LocalY, d.LocalZ));
+        Assert.Equal((ushort)5, d.BlockId);
+    }
+
+    [Fact]
     public void GunHold_round_trips()
     {
         byte[] encoded = Protocol.EncodeGunHold(99);

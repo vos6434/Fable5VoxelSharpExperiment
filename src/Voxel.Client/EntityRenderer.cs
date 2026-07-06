@@ -13,15 +13,18 @@ namespace Voxel.Client;
 /// </summary>
 public sealed class EntityRenderer : IDisposable
 {
+    public readonly record struct EntityRaycastHit(
+        uint EntityId, int LocalX, int LocalY, int LocalZ, int Nx, int Ny, int Nz, double Distance);
+
     private sealed class Entity
     {
+        public required uint Id;
         public required int DimX, DimY, DimZ;
         public required float PivotX, PivotY, PivotZ;
+        public required ushort[] Blocks;
         public required ChunkMesh Mesh;
-        // Rendered (smoothed) pose.
         public float X, Y, Z;
         public float Qx, Qy, Qz, Qw = 1;
-        // Target pose from the latest state + velocity for extrapolation.
         public float Tx, Ty, Tz;
         public float TQx, TQy, TQz, TQw = 1;
         public float Vx, Vy, Vz;
@@ -45,7 +48,7 @@ public sealed class EntityRenderer : IDisposable
         switch (evt)
         {
             case ServerEvent.EntitySpawned s:
-                Spawn(s);
+                Upsert(s);
                 break;
             case ServerEvent.EntityStates states:
                 foreach (var st in states.States)
@@ -68,20 +71,24 @@ public sealed class EntityRenderer : IDisposable
         }
     }
 
-    private void Spawn(ServerEvent.EntitySpawned s)
+    private void Upsert(ServerEvent.EntitySpawned s)
     {
-        if (_entities.ContainsKey(s.Id)) return;
+        if (_entities.Remove(s.Id, out var existing)) existing.Mesh.Dispose();
+
         var pass = BuildMesh(s.Blocks, s.DimX, s.DimY, s.DimZ);
-        if (pass is null) return; // all air — nothing to draw
+        if (pass is null) return;
         _entities[s.Id] = new Entity
         {
+            Id = s.Id,
             DimX = s.DimX, DimY = s.DimY, DimZ = s.DimZ,
             PivotX = s.PivotX, PivotY = s.PivotY, PivotZ = s.PivotZ,
+            Blocks = s.Blocks,
             Mesh = new ChunkMesh(_gl, pass),
             X = (float)s.X, Y = (float)s.Y, Z = (float)s.Z,
             Qx = s.Qx, Qy = s.Qy, Qz = s.Qz, Qw = s.Qw,
             Tx = (float)s.X, Ty = (float)s.Y, Tz = (float)s.Z,
             TQx = s.Qx, TQy = s.Qy, TQz = s.Qz, TQw = s.Qw,
+            Seen = true,
         };
     }
 
@@ -102,39 +109,80 @@ public sealed class EntityRenderer : IDisposable
         }
     }
 
-    /// <summary>Draws all entities with the chunk shader; caller has set the shared lighting uniforms.</summary>
+    public float[] GetModelMatrix(uint id)
+    {
+        if (!_entities.TryGetValue(id, out var e)) return Mat4.Identity();
+        return ModelMatrix(e);
+    }
+
+    /// <summary>Nearest voxel hit on any entity grid within reach.</summary>
+    public EntityRaycastHit? Raycast(
+        double ox, double oy, double oz, double dx, double dy, double dz, double maxDistance)
+    {
+        EntityRaycastHit? best = null;
+        foreach (var e in _entities.Values)
+        {
+            var localEye = EntityGridRaycast.WorldToLocal(
+                new System.Numerics.Vector3((float)ox, (float)oy, (float)oz),
+                new System.Numerics.Vector3(e.X, e.Y, e.Z),
+                new System.Numerics.Quaternion(e.Qx, e.Qy, e.Qz, e.Qw),
+                new System.Numerics.Vector3(e.PivotX, e.PivotY, e.PivotZ));
+            var localDir = EntityGridRaycast.LocalDirection(
+                new System.Numerics.Vector3((float)dx, (float)dy, (float)dz),
+                new System.Numerics.Quaternion(e.Qx, e.Qy, e.Qz, e.Qw));
+
+            var hit = EntityGridRaycast.CastLocal(
+                localEye.X, localEye.Y, localEye.Z,
+                localDir.X, localDir.Y, localDir.Z,
+                maxDistance,
+                e.DimX, e.DimY, e.DimZ,
+                e.Blocks, IsTargetable);
+            if (hit is null) continue;
+            if (best is not null && hit.Value.Distance >= best.Value.Distance) continue;
+            best = new EntityRaycastHit(e.Id, hit.Value.LocalX, hit.Value.LocalY, hit.Value.LocalZ,
+                hit.Value.Nx, hit.Value.Ny, hit.Value.Nz, hit.Value.Distance);
+        }
+        return best;
+    }
+
+    public bool IsEmptyCell(uint entityId, int lx, int ly, int lz)
+    {
+        if (!_entities.TryGetValue(entityId, out var e)) return false;
+        if (lx < 0 || ly < 0 || lz < 0 || lx >= e.DimX || ly >= e.DimY || lz >= e.DimZ) return true;
+        return e.Blocks[(ly * e.DimZ + lz) * e.DimX + lx] == 0;
+    }
+
+    private bool IsTargetable(ushort id) =>
+        id != 0 && _data.Blocks.Get(id).Collision != Collision.Liquid;
+
     public void Render(GlShader shader)
     {
         shader.SetVec3("uChunkOrigin", 0, 0, 0);
         foreach (var e in _entities.Values)
         {
-            // model = T(pos) * R(quat) * T(-pivot): the body origin is the grid
-            // corner + pivot (center of mass), so shift the grid back by -pivot.
-            float[] model = Mat4.Multiply(
-                Mat4.Multiply(Mat4.Translation(e.X, e.Y, e.Z), Mat4.FromQuaternion(e.Qx, e.Qy, e.Qz, e.Qw)),
-                Mat4.Translation(-e.PivotX, -e.PivotY, -e.PivotZ));
-            shader.SetMatrix("uModel", model);
+            shader.SetMatrix("uModel", ModelMatrix(e));
             e.Mesh.Draw();
         }
     }
 
-    // Simple per-block cube mesh (chunk vertex format: pos3 uv2 meta2). Faces
-    // hidden against solid same-grid neighbors; grid edges are exposed to air.
+    private static float[] ModelMatrix(Entity e) =>
+        Mat4.Multiply(
+            Mat4.Multiply(Mat4.Translation(e.X, e.Y, e.Z), Mat4.FromQuaternion(e.Qx, e.Qy, e.Qz, e.Qw)),
+            Mat4.Translation(-e.PivotX, -e.PivotY, -e.PivotZ));
+
     private MeshPass? BuildMesh(ushort[] blocks, int dimX, int dimY, int dimZ)
     {
-        // FACE_DIRS order px,nx,py,ny,pz,nz.
         (int dx, int dy, int dz)[] normals =
             [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)];
         float[] faceBrightness = [0.6f, 0.6f, 1.0f, 0.5f, 0.8f, 0.8f];
-        // 4 CCW corners per face (unit cube), matching the greedy mesher winding.
         float[][][] faceCorners =
         [
-            [[1,0,0],[1,1,0],[1,1,1],[1,0,1]], // px
-            [[0,0,1],[0,1,1],[0,1,0],[0,0,0]], // nx
-            [[0,1,1],[1,1,1],[1,1,0],[0,1,0]], // py
-            [[0,0,0],[1,0,0],[1,0,1],[0,0,1]], // ny
-            [[0,0,1],[1,0,1],[1,1,1],[0,1,1]], // pz
-            [[1,0,0],[0,0,0],[0,1,0],[1,1,0]], // nz
+            [[1,0,0],[1,1,0],[1,1,1],[1,0,1]],
+            [[0,0,1],[0,1,1],[0,1,0],[0,0,0]],
+            [[0,1,1],[1,1,1],[1,1,0],[0,1,0]],
+            [[0,0,0],[1,0,0],[1,0,1],[0,0,1]],
+            [[0,0,1],[1,0,1],[1,1,1],[0,1,1]],
+            [[1,0,0],[0,0,0],[0,1,0],[1,1,0]],
         ];
         float[][] faceUv = [[0, 0], [1, 0], [1, 1], [0, 1]];
 
@@ -157,7 +205,7 @@ public sealed class EntityRenderer : IDisposable
             for (int f = 0; f < 6; f++)
             {
                 var (nx, ny, nz) = normals[f];
-                if (At(x + nx, y + ny, z + nz) != 0) continue; // hidden by neighbor
+                if (At(x + nx, y + ny, z + nz) != 0) continue;
                 int layer = _data.RenderTable[id * 6 + f];
                 float brightness = faceBrightness[f] + (emissive ? 4f : 0f);
                 uint baseIndex = (uint)(verts.Count / 7);

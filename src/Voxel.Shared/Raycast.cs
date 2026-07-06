@@ -1,10 +1,10 @@
-namespace Voxel.Client;
+namespace Voxel.Shared;
 
-public readonly record struct RaycastHit(int X, int Y, int Z, int Nx, int Ny, int Nz);
+public readonly record struct RaycastHit(int X, int Y, int Z, int Nx, int Ny, int Nz, double Distance);
 
 /// <summary>
-/// Voxel DDA (Amanatides &amp; Woo), ported from the web client: steps the ray
-/// cell-by-cell so targeting is exact at block resolution.
+/// Voxel DDA (Amanatides &amp; Woo): steps the ray cell-by-cell so targeting
+/// is exact at block resolution.
 /// </summary>
 public static class Raycast
 {
@@ -38,7 +38,7 @@ public static class Raycast
         {
             if (t > 0 && isTargetable(x, y, z))
             {
-                return new RaycastHit(x, y, z, nx, ny, nz);
+                return new RaycastHit(x, y, z, nx, ny, nz, t);
             }
             if (tMaxX < tMaxY && tMaxX < tMaxZ)
             {

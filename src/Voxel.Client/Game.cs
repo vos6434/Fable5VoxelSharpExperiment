@@ -83,7 +83,7 @@ public sealed class Game
     private IMouse _mouse = null!;
 
     private const float Reach = 6f;
-    private RaycastHit? _target;
+    private AimTarget? _target;
 
     private System.Numerics.Vector2 _lastMouse;
     private bool _firstMouse = true;
@@ -380,6 +380,7 @@ public sealed class Game
 
     private void DrawThickBoxEdge(float ox, float oy, float oz, float sx, float sy, float sz, float r, float g, float b)
     {
+        _colorShader.SetInt("uUseModel", 0);
         _colorShader.SetVec3("uOrigin", ox, oy, oz);
         _colorShader.SetVec3("uScale", sx, sy, sz);
         _colorShader.SetFloat4("uColor", r, g, b, 1f);
@@ -389,6 +390,7 @@ public sealed class Game
     private void DrawGlueCornerMarker((int X, int Y, int Z) c, float r, float g, float b)
     {
         const float pad = 0.006f;
+        _colorShader.SetInt("uUseModel", 0);
         _colorShader.SetVec3("uOrigin", c.X - pad, c.Y - pad, c.Z - pad);
         _colorShader.SetVec3("uScale", 1 + pad * 2, 1 + pad * 2, 1 + pad * 2);
         _colorShader.SetFloat4("uColor", r, g, b, 1f);
@@ -425,16 +427,30 @@ public sealed class Game
         DrawThickBoxEdge(ox + sx - t, oy, oz + sz - t, d, sy, d, r, g, b);
     }
 
-    private RaycastHit? Aim()
+    private RaycastHit? WorldAim()
     {
         var (dx, dy, dz) = AimDirection();
         return Raycast.Cast(_camera.X, _camera.Y, _camera.Z, dx, dy, dz, Reach, IsTargetable);
     }
 
+    private AimTarget? Aim()
+    {
+        var (dx, dy, dz) = AimDirection();
+        var world = Raycast.Cast(_camera.X, _camera.Y, _camera.Z, dx, dy, dz, Reach, IsTargetable);
+        var entity = _entities.Raycast(_camera.X, _camera.Y, _camera.Z, dx, dy, dz, Reach);
+
+        if (world is null && entity is null) return null;
+        if (world is null) return new AimTarget.Entity(entity!.Value);
+        if (entity is null) return new AimTarget.World(world.Value);
+        return world.Value.Distance <= entity.Value.Distance
+            ? new AimTarget.World(world.Value)
+            : new AimTarget.Entity(entity.Value);
+    }
+
     /// <summary>WorldEdit corner: solid under crosshair, or adjacent air cell when ctrl is held.</summary>
     private (int X, int Y, int Z)? GlueCornerFromAim(bool allowAir)
     {
-        if (Aim() is not RaycastHit hit) return null;
+        if (WorldAim() is not RaycastHit hit) return null;
         if (allowAir)
         {
             int ax = hit.X + hit.Nx, ay = hit.Y + hit.Ny, az = hit.Z + hit.Nz;
@@ -449,7 +465,7 @@ public sealed class Game
 
     private (int X, int Y, int Z)? GluePreviewCorner()
     {
-        if (_target is not RaycastHit hit) return null;
+        if (WorldAim() is not RaycastHit hit) return null;
         bool ctrl = _keyboard.IsKeyPressed(Key.ControlLeft) || _keyboard.IsKeyPressed(Key.ControlRight);
         if (ctrl)
         {
@@ -462,24 +478,49 @@ public sealed class Game
 
     private void BreakTargeted()
     {
-        if (Aim() is not RaycastHit hit) return;
-        // Predict locally; the server echo confirms.
-        _world.SetBlock(hit.X, hit.Y, hit.Z, 0);
-        _connection.SendSetBlock(hit.X, hit.Y, hit.Z, 0);
+        if (Aim() is not { } target) return;
+        switch (target)
+        {
+            case AimTarget.World w:
+                _world.SetBlock(w.Hit.X, w.Hit.Y, w.Hit.Z, 0);
+                _connection.SendSetBlock(w.Hit.X, w.Hit.Y, w.Hit.Z, 0);
+                break;
+            case AimTarget.Entity e:
+                _connection.SendEntityBlock(e.Hit.EntityId, e.Hit.LocalX, e.Hit.LocalY, e.Hit.LocalZ, 0);
+                break;
+        }
     }
 
     private void PlaceAtTarget()
     {
-        if (Aim() is not RaycastHit hit) return;
+        if (Aim() is not { } target) return;
         var stack = _inventory.SelectedStack();
         var blockDef = stack is null ? null : _data.Blocks.ById(stack.Id);
-        if (blockDef is null) return; // empty hand or a non-block item
-        int px = hit.X + hit.Nx;
-        int py = hit.Y + hit.Ny;
-        int pz = hit.Z + hit.Nz;
-        if (_world.GetBlock(px, py, pz) != 0) return;
-        _world.SetBlock(px, py, pz, (ushort)blockDef.NumericId);
-        _connection.SendSetBlock(px, py, pz, (ushort)blockDef.NumericId);
+        if (blockDef is null) return;
+        ushort blockId = (ushort)blockDef.NumericId;
+
+        switch (target)
+        {
+            case AimTarget.World w:
+            {
+                int px = w.Hit.X + w.Hit.Nx;
+                int py = w.Hit.Y + w.Hit.Ny;
+                int pz = w.Hit.Z + w.Hit.Nz;
+                if (_world.GetBlock(px, py, pz) != 0) return;
+                _world.SetBlock(px, py, pz, blockId);
+                _connection.SendSetBlock(px, py, pz, blockId);
+                break;
+            }
+            case AimTarget.Entity e:
+            {
+                int px = e.Hit.LocalX + e.Hit.Nx;
+                int py = e.Hit.LocalY + e.Hit.Ny;
+                int pz = e.Hit.LocalZ + e.Hit.Nz;
+                if (!_entities.IsEmptyCell(e.Hit.EntityId, px, py, pz)) return;
+                _connection.SendEntityBlock(e.Hit.EntityId, px, py, pz, blockId);
+                break;
+            }
+        }
     }
 
     private unsafe uint CreateAtlasTexture()
@@ -778,12 +819,23 @@ public sealed class Game
                 draws++;
             }
         }
-        if (_target is RaycastHit target)
+        if (_target is AimTarget.World worldTarget)
         {
-            _colorShader.SetVec3("uOrigin", target.X - 0.001f, target.Y - 0.001f, target.Z - 0.001f);
+            _colorShader.SetInt("uUseModel", 0);
+            _colorShader.SetVec3("uOrigin", worldTarget.Hit.X - 0.001f, worldTarget.Hit.Y - 0.001f, worldTarget.Hit.Z - 0.001f);
             _colorShader.SetVec3("uScale", 1.002f, 1.002f, 1.002f);
             _colorShader.SetFloat4("uColor", 0.07f, 0.07f, 0.07f, 1f);
             _cubeLines.Draw();
+        }
+        else if (_target is AimTarget.Entity entityTarget)
+        {
+            _colorShader.SetInt("uUseModel", 1);
+            _colorShader.SetMatrix("uModel", _entities.GetModelMatrix(entityTarget.Hit.EntityId));
+            _colorShader.SetVec3("uOrigin", entityTarget.Hit.LocalX - 0.001f, entityTarget.Hit.LocalY - 0.001f, entityTarget.Hit.LocalZ - 0.001f);
+            _colorShader.SetVec3("uScale", 1.002f, 1.002f, 1.002f);
+            _colorShader.SetFloat4("uColor", 0.07f, 0.07f, 0.07f, 1f);
+            _cubeLines.Draw();
+            _colorShader.SetInt("uUseModel", 0);
         }
         _timerWorld.End();
 

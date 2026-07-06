@@ -102,6 +102,9 @@ public sealed class Connection : IDisposable
     public void SendSetBlock(int x, int y, int z, ushort blockId) =>
         _outbox.Writer.TryWrite(Protocol.EncodeBlockChange(Msg.SetBlock, x, y, z, blockId));
 
+    public void SendEntityBlock(uint entityId, int localX, int localY, int localZ, ushort blockId) =>
+        _outbox.Writer.TryWrite(Protocol.EncodeEntityBlock(entityId, localX, localY, localZ, blockId));
+
     public void SendUseItem(Protocol.ItemAction action, int x, int y, int z) =>
         _outbox.Writer.TryWrite(Protocol.EncodeUseItem(action, x, y, z));
 

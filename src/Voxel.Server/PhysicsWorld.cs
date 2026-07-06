@@ -23,14 +23,14 @@ public sealed partial class PhysicsWorld : IDisposable
     {
         public required uint Id { get; init; }
         public required byte Kind { get; init; }
-        public required BodyHandle Body { get; init; }
-        public required ushort DimX { get; init; }
-        public required ushort DimY { get; init; }
-        public required ushort DimZ { get; init; }
+        public required BodyHandle Body { get; set; }
+        public required ushort DimX { get; set; }
+        public required ushort DimY { get; set; }
+        public required ushort DimZ { get; set; }
         /// <summary>Grid blocks (x-fastest,z,y) for the spawn payload / client mesh.</summary>
-        public required ushort[] Blocks { get; init; }
+        public required ushort[] Blocks { get; set; }
         /// <summary>Center-of-mass in grid-local coords (body origin = grid corner + pivot).</summary>
-        public required Vector3 Pivot { get; init; }
+        public required Vector3 Pivot { get; set; }
         /// <summary>Awake on the previous poll (for sleep-transition persistence).</summary>
         public bool WasAwake { get; set; } = true;
     }

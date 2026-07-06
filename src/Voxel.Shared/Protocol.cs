@@ -19,6 +19,7 @@ public enum Msg : byte
     SetBlock = 4,     // i32 x,y,z, u16 blockId (0 = break)
     TimeControl = 5,  // i64 setTick (-1 = no change), f32 timescale (<0 = no change)
     UseItem = 6,      // u8 action, i32 x,y,z (block coords or gun hold distance in centi-blocks)
+    EntityBlock = 7,  // u32 entityId, i32 lx,ly,lz, u16 blockId (0 = break)
     // server → client
     Welcome = 10,     // JSON { playerId, seed, spawn, palette, protocolVersion }
     ChunkData = 11,   // i32 cx,cy,cz, u8 empty, [deflate-raw u16 LE blocks]
@@ -89,9 +90,10 @@ public static class Protocol
     /// 3 = TimeControl (debug menu time slider / pause),
     /// 4 = physics entities (spawn/state/despawn),
     /// 5 = UseItem + glue marks + EntitySpawn pivot (contraptions),
-    /// 6 = physics gun (grab actions + GunHold sync).
+    /// 6 = physics gun (grab actions + GunHold sync),
+    /// 7 = build on contraptions (EntityBlock edit + EntitySpawn resync).
     /// </summary>
-    public const int Version = 6;
+    public const int Version = 7;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -338,6 +340,28 @@ public static class Protocol
             BinaryPrimitives.ReadInt32LittleEndian(message[2..]),
             BinaryPrimitives.ReadInt32LittleEndian(message[6..]),
             BinaryPrimitives.ReadInt32LittleEndian(message[10..]));
+
+    public readonly record struct EntityBlockEdit(uint EntityId, int LocalX, int LocalY, int LocalZ, ushort BlockId);
+
+    public static byte[] EncodeEntityBlock(uint entityId, int localX, int localY, int localZ, ushort blockId)
+    {
+        var outBuf = new byte[19];
+        outBuf[0] = (byte)Msg.EntityBlock;
+        BinaryPrimitives.WriteUInt32LittleEndian(outBuf.AsSpan(1), entityId);
+        BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(5), localX);
+        BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(9), localY);
+        BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(13), localZ);
+        BinaryPrimitives.WriteUInt16LittleEndian(outBuf.AsSpan(17), blockId);
+        return outBuf;
+    }
+
+    public static EntityBlockEdit DecodeEntityBlock(ReadOnlySpan<byte> message)
+        => new(
+            BinaryPrimitives.ReadUInt32LittleEndian(message[1..]),
+            BinaryPrimitives.ReadInt32LittleEndian(message[5..]),
+            BinaryPrimitives.ReadInt32LittleEndian(message[9..]),
+            BinaryPrimitives.ReadInt32LittleEndian(message[13..]),
+            BinaryPrimitives.ReadUInt16LittleEndian(message[17..]));
 
     public static byte[] EncodeGlueMarks(IReadOnlyList<(int X, int Y, int Z)> marks)
     {

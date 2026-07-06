@@ -166,6 +166,55 @@ public sealed class GameServer
 
     private const int MaxContraptionBlocks = 1000;
 
+    private bool IsEntityTargetable(ushort id)
+    {
+        if (id == 0 || id >= _blocks.Count) return false;
+        return _blocks.Get(id).Collision != Collision.Liquid;
+    }
+
+    private bool IsPlaceableBlock(ushort id)
+    {
+        if (id == 0 || id >= _blocks.Count) return false;
+        var def = _blocks.Get(id);
+        return def.Collision != Collision.Liquid && def.Hardness >= 0;
+    }
+
+    private void HandleEntityBlock(Client client, Protocol.EntityBlockEdit edit)
+    {
+        ClientLook(client, out var eye, out var rayDir);
+        if (!_physics.TryRaycastEntity(eye, rayDir, IsEntityTargetable, out var hit)) return;
+        if (hit.EntityId != edit.EntityId) return;
+
+        if (edit.BlockId == 0)
+        {
+            if (hit.LocalX != edit.LocalX || hit.LocalY != edit.LocalY || hit.LocalZ != edit.LocalZ) return;
+        }
+        else
+        {
+            if (!IsPlaceableBlock(edit.BlockId)) return;
+            int px = hit.LocalX + hit.Nx;
+            int py = hit.LocalY + hit.Ny;
+            int pz = hit.LocalZ + hit.Nz;
+            if (px != edit.LocalX || py != edit.LocalY || pz != edit.LocalZ) return;
+        }
+
+        if (!_physics.TryEditEntityBlock(edit.EntityId, edit.LocalX, edit.LocalY, edit.LocalZ, edit.BlockId, IsPlaceableBlock, out bool removed))
+            return;
+
+        if (removed)
+        {
+            _spawnPayloads.TryRemove(edit.EntityId, out _);
+            Broadcast(Protocol.EncodeEntityDespawn(edit.EntityId, becameBlocks: false));
+            return;
+        }
+
+        if (!_physics.Entities.TryGetValue(edit.EntityId, out var entity)) return;
+        var (pos, rot, _) = _physics.GetState(entity);
+        byte[] payload = EncodeSpawn(entity, pos, rot);
+        _spawnPayloads[entity.Id] = payload;
+        Broadcast(payload);
+    }
+
     private ushort GetWorldBlock(int x, int y, int z)
     {
         lock (_worldLock)
@@ -528,6 +577,9 @@ public sealed class GameServer
             }
             case Msg.UseItem:
                 HandleUseItem(client, Protocol.DecodeUseItem(data));
+                break;
+            case Msg.EntityBlock:
+                _tickActions.Enqueue(() => HandleEntityBlock(client, Protocol.DecodeEntityBlock(data)));
                 break;
             case Msg.TimeControl:
             {
