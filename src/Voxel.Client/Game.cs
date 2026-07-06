@@ -143,19 +143,21 @@ public sealed class Game
             int uiButton = button == MouseButton.Right ? 2 : 0;
             if (_camera.Captured)
             {
-                // Glue in hand: RMB sets corner 1 then corner 2 (WorldEdit-style
-                // box), Ctrl+RMB sets a corner on the targeted air cell, Shift+RMB
-                // activates, LMB clears the selection.
+                // Glue in hand (WorldEdit-style): LMB sets corner 1, RMB sets
+                // corner 2, Ctrl targets the adjacent air cell instead of the solid,
+                // Shift+RMB glues the box into a contraption, Shift+LMB clears.
                 if (_inventory.SelectedStack()?.Id == "glue")
                 {
                     bool shift = _keyboard.IsKeyPressed(Key.ShiftLeft) || _keyboard.IsKeyPressed(Key.ShiftRight);
                     bool ctrl = _keyboard.IsKeyPressed(Key.ControlLeft) || _keyboard.IsKeyPressed(Key.ControlRight);
-                    if (button == MouseButton.Right && shift)
-                        _connection.SendUseItem(Protocol.ItemAction.GlueActivate, 0, 0, 0);
-                    else if (button == MouseButton.Right && GlueCornerFromAim(ctrl) is { } corner)
-                        _connection.SendUseItem(Protocol.ItemAction.GlueMark, corner.X, corner.Y, corner.Z);
-                    else if (button == MouseButton.Left)
+                    if (button == MouseButton.Left && shift)
                         _connection.SendUseItem(Protocol.ItemAction.GlueClear, 0, 0, 0);
+                    else if (button == MouseButton.Right && shift)
+                        _connection.SendUseItem(Protocol.ItemAction.GlueActivate, 0, 0, 0);
+                    else if (button == MouseButton.Left && GlueCornerFromAim(ctrl) is { } c1)
+                        _connection.SendUseItem(Protocol.ItemAction.GlueCorner1, c1.X, c1.Y, c1.Z);
+                    else if (button == MouseButton.Right && GlueCornerFromAim(ctrl) is { } c2)
+                        _connection.SendUseItem(Protocol.ItemAction.GlueCorner2, c2.X, c2.Y, c2.Z);
                     return;
                 }
                 if (_inventory.SelectedStack()?.Id == "physics_gun")

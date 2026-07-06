@@ -91,9 +91,10 @@ public static class Protocol
     /// 4 = physics entities (spawn/state/despawn),
     /// 5 = UseItem + glue marks + EntitySpawn pivot (contraptions),
     /// 6 = physics gun (grab actions + GunHold sync),
-    /// 7 = build on contraptions (EntityBlock edit + EntitySpawn resync).
+    /// 7 = build on contraptions (EntityBlock edit + EntitySpawn resync),
+    /// 8 = WorldEdit-style glue corners (LMB corner 1 / RMB corner 2).
     /// </summary>
-    public const int Version = 7;
+    public const int Version = 8;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -292,6 +293,8 @@ public static class Protocol
         GunGrab = 3, GunRelease = 4, GunThrow = 5,
         /// <summary>z = hold distance in centi-blocks (200–800 → 2.0–8.0 blocks).</summary>
         GunSetDistance = 6,
+        // WorldEdit-style corners: LMB sets corner 1, RMB sets corner 2.
+        GlueCorner1 = 7, GlueCorner2 = 8,
     }
 
     /// <summary>Sync the marking player's box selection (0, 1, or 2 corners).</summary>

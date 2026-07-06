@@ -258,24 +258,31 @@ public sealed class GameServer
         return marks;
     }
 
+    /// <summary>A corner may sit on air (empty-space bound) or a glueable solid, but never a non-glueable block.</summary>
+    private bool TrySelectGlueCorner((Protocol.ItemAction Action, int X, int Y, int Z) use, out (int X, int Y, int Z) corner)
+    {
+        corner = (use.X, use.Y, use.Z);
+        ushort id = GetWorldBlock(use.X, use.Y, use.Z);
+        return id == 0 || IsGlueable(id);
+    }
+
     private void HandleUseItem(Client client, (Protocol.ItemAction Action, int X, int Y, int Z) use)
     {
         switch (use.Action)
         {
+            case Protocol.ItemAction.GlueCorner1:
+                if (TrySelectGlueCorner(use, out var gc1)) { client.GlueCorner1 = gc1; SyncGlueSelection(client); }
+                break;
+            case Protocol.ItemAction.GlueCorner2:
+                if (TrySelectGlueCorner(use, out var gc2)) { client.GlueCorner2 = gc2; SyncGlueSelection(client); }
+                break;
             case Protocol.ItemAction.GlueMark:
             {
-                ushort id = GetWorldBlock(use.X, use.Y, use.Z);
-                if (id != 0 && !IsGlueable(id)) break; // corner on air or glueable solid
-                var p = (use.X, use.Y, use.Z);
-                if (client.GlueCorner1 is null)
-                    client.GlueCorner1 = p;
-                else if (client.GlueCorner2 is null)
-                    client.GlueCorner2 = p;
-                else
-                {
-                    client.GlueCorner1 = p;
-                    client.GlueCorner2 = null;
-                }
+                // Legacy alternating mark (kept for wire compat): corner 1, then 2, then reset.
+                if (!TrySelectGlueCorner(use, out var p)) break;
+                if (client.GlueCorner1 is null) client.GlueCorner1 = p;
+                else if (client.GlueCorner2 is null) client.GlueCorner2 = p;
+                else { client.GlueCorner1 = p; client.GlueCorner2 = null; }
                 SyncGlueSelection(client);
                 break;
             }
