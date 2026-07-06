@@ -152,8 +152,11 @@ public sealed partial class PhysicsWorld : IDisposable
     public void Step(float dt)
     {
         UpdateTerrainColliders();
-        _sim.Timestep(dt);
+        // Buoyancy before the timestep: its gravity-cancelling lift and the integrator's
+        // gravity resolve together, so a settled boat reads ~zero velocity and can sleep
+        // (instead of a phantom vy that keeps it awake forever).
         ApplyBuoyancy(dt);
+        _sim.Timestep(dt);
     }
 
     /// <summary>Ensures chunks near awake bodies have colliders; drops the rest.</summary>

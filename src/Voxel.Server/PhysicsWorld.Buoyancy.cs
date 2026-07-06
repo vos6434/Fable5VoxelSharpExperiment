@@ -11,8 +11,6 @@ public sealed partial class PhysicsWorld
     private const float VerticalWaterDrag = 8f;
     /// <summary>Average wet fraction at equilibrium; lower = more hull above the waterline.</summary>
     private const float RelativeBlockDensity = 0.35f;
-    private const float HeightSpring = 6f;
-    private const float HeightDamp = 4f;
     private const float UprightStrength = 10f;
     private const float UprightDamp = 5f;
     private const int WaterScanMinY = WorldGen.SeaLevel - 48;
@@ -30,10 +28,11 @@ public sealed partial class PhysicsWorld
         foreach (var entity in _entities.Values)
         {
             var body = _sim.Bodies[entity.Body];
+            // Let calm floating bodies sleep — a sleeping body keeps its pose, so it stays
+            // afloat without us re-applying lift every tick. Bepu wakes it on any contact/grab.
+            if (!body.Awake) continue;
             if (!TryApplyBuoyancy(entity, body, dt, out float submerged)) continue;
 
-            body.Awake = true;
-            ApplyHeightSpring(entity, body, submerged, dt);
             ApplyUprightTorque(body, submerged, dt);
 
             float horizDamp = 1f / (1f + WaterDrag * submerged * dt);
@@ -95,59 +94,10 @@ public sealed partial class PhysicsWorld
     }
 
     /// <summary>
-    /// Gentle draft spring toward the equilibrium waterline. The target draft is the *average*
-    /// hull depth per footprint column times the density, so a tall mast (a single column) no
-    /// longer inflates the target and drags the whole hull under.
+    /// Critically-damped self-righting: drives the grid's +Y back to world up. Applied
+    /// directly to angular velocity (not as an inertia-scaled impulse) so a tall, top-heavy
+    /// mast can't overpower it and leave the boat leaning at a tilted equilibrium.
     /// </summary>
-    private void ApplyHeightSpring(Entity entity, BodyReference body, float submerged, float dt)
-    {
-        var pos = body.Pose.Position;
-        if (!TryGetWaterSurface((int)MathF.Floor(pos.X), (int)MathF.Floor(pos.Z), out float surface)) return;
-        if (!TryGetHullMetrics(entity, body, out float solidMinY, out float averageDepth)) return;
-
-        float targetMinY = surface - averageDepth * RelativeBlockDensity;
-        float error = targetMinY - solidMinY;
-        float vy = body.Velocity.Linear.Y;
-        body.Velocity.Linear += Vector3.UnitY * ((HeightSpring * error - HeightDamp * vy) * submerged * dt);
-    }
-
-    /// <summary>Lowest solid world-Y and the mean hull depth (solid + trapped air) per occupied column.</summary>
-    private static bool TryGetHullMetrics(Entity entity, BodyReference body, out float minY, out float averageDepth)
-    {
-        minY = float.MaxValue;
-        averageDepth = 0f;
-        var pivot = entity.Pivot;
-        var rot = body.Pose.Orientation;
-        var pos = body.Pose.Position;
-        int dimX = entity.DimX, dimY = entity.DimY, dimZ = entity.DimZ;
-
-        int hullCells = 0, columns = 0;
-        for (int z = 0; z < dimZ; z++)
-        for (int x = 0; x < dimX; x++)
-        {
-            bool solidBelow = false;
-            int columnCells = 0;
-            for (int y = 0; y < dimY; y++)
-            {
-                bool solid = entity.Blocks[(y * dimZ + z) * dimX + x] != 0;
-                if (!solid && !solidBelow) continue;
-                columnCells++;
-                if (!solid) continue;
-                solidBelow = true;
-                float wy = (Vector3.Transform(new Vector3(x + 0.5f, y + 0.5f, z + 0.5f) - pivot, rot) + pos).Y;
-                minY = MathF.Min(minY, wy - 0.5f);
-            }
-            if (columnCells == 0) continue;
-            hullCells += columnCells;
-            columns++;
-        }
-
-        if (columns == 0) return false;
-        averageDepth = MathF.Max(0.5f, (float)hullCells / columns);
-        return true;
-    }
-
-    /// <summary>PD torque: level grid +Y toward world up without overshooting.</summary>
     private static void ApplyUprightTorque(BodyReference body, float submerged, float dt)
     {
         Vector3 bodyUp = Vector3.Transform(Vector3.UnitY, body.Pose.Orientation);
@@ -155,9 +105,12 @@ public sealed partial class PhysicsWorld
         float sin = axis.Length();
         if (sin < 1e-4f) return;
         axis /= sin;
-        float tiltDamp = Vector3.Dot(body.Velocity.Angular, axis);
-        float torque = UprightStrength * sin - UprightDamp * tiltDamp;
-        body.ApplyAngularImpulse(axis * (torque * submerged * dt));
+        // Full tilt angle (0..π) so the correction keeps growing past 90° instead of fading.
+        float angle = MathF.Atan2(sin, bodyUp.Y);
+        float tiltRate = Vector3.Dot(body.Velocity.Angular, axis);
+        float wet = MathF.Min(1f, submerged * 3f); // only right a hull that's actually in the water
+        float accel = (UprightStrength * angle - UprightDamp * tiltRate) * wet;
+        body.Velocity.Angular += axis * (accel * dt);
     }
 
     /// <summary>Fraction of a 1³ block below the local water-air surface.</summary>
