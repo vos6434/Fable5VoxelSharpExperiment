@@ -80,6 +80,30 @@ public class EntityWaterMaskTests
     }
 
     [Fact]
+    public void Concave_notch_in_the_hull_is_still_masked()
+    {
+        // A rectangular hull with a 1-wide step cut into one wall — the notch pocket, open to the
+        // sea through a narrow channel, must still be masked (morphological close seals it).
+        const int dx = 7, dy = 1, dz = 7;
+        var blocks = Grid(dx, dy, dz, (x, y, z, b) =>
+        {
+            for (int zz = 0; zz < dz; zz++)
+            for (int xx = 0; xx < dx; xx++)
+                if (xx == 0 || xx == dx - 1 || zz == 0 || zz == dz - 1)
+                    b[(0 * dz + zz) * dx + xx] = P;
+            // Push the middle of the top wall inward one cell (a concave notch).
+            b[(0 * dz + 0) * dx + 3] = 0;
+            b[(0 * dz + 1) * dx + 3] = P;
+        });
+
+        var result = EntityRenderer.ComputeInteriorColumns(blocks, dx, dy, dz);
+        Assert.NotNull(result);
+        var (interior, _) = result.Value;
+        Assert.True(interior[3 * dx + 3], "hull center should be masked");
+        Assert.True(interior[0 * dx + 3], "the concave notch pocket should be masked, not left as water");
+    }
+
+    [Fact]
     public void Deck_height_ignores_a_tall_mast()
     {
         const int dx = 5, dy = 8, dz = 5;

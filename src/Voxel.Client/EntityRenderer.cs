@@ -283,14 +283,17 @@ public sealed class EntityRenderer : IDisposable
         return new MeshPass { Vertices = [.. verts], Indices = [.. indices] };
     }
 
+    /// <summary>Chebyshev radius for the morphological close — seals hull gaps/notches up to ~2R wide.</summary>
+    private const int HullCloseRadius = 2;
+
     /// <summary>
-    /// Hull-interior columns for the water lid. A "wall" column holds any block; an empty column
-    /// is interior when it lies between hull walls on both axes (a wall somewhere to its -X and
-    /// +X, and to its -Z and +Z). This silhouette fill tolerates gaps in the hull line — a
-    /// pointed bow or a doorway no longer disables the whole lid the way strict enclosure did.
-    /// Deck height is one above the *most common* wall-top: a low bow step or a tall single-column
-    /// mast is outvoted by the hull's dominant course. Null when the footprint encloses nothing
-    /// (open raft, or a solid-floored hull with no empty columns).
+    /// Hull-interior columns for the water lid. A "wall" column holds any block. The wall mask is
+    /// morphologically closed (dilate then erode) to seal narrow gaps and concave notches, then the
+    /// open sea is flood-filled inward from the footprint border; every non-wall column the sea
+    /// can't reach is hull interior. This handles arbitrary hull outlines — open bows, doorways,
+    /// and stepped edges — without masking the ocean around a convex hull (closing leaves the outer
+    /// boundary in place). Deck height is one above the *most common* wall-top, so a low bow step
+    /// or a tall single-column mast doesn't skew it. Null when nothing is enclosed.
     /// </summary>
     public static (bool[] Interior, int DeckY)? ComputeInteriorColumns(ushort[] blocks, int dimX, int dimY, int dimZ)
     {
@@ -313,33 +316,80 @@ public sealed class EntityRenderer : IDisposable
         foreach (var (top, count) in topCounts)
             if (count > bestCount || (count == bestCount && top > deckTop)) { deckTop = top; bestCount = count; }
 
-        // Per-row X span and per-column Z span of the hull walls.
-        var rowMinX = new int[dimZ]; var rowMaxX = new int[dimZ];
-        var colMinZ = new int[dimX]; var colMaxZ = new int[dimX];
-        Array.Fill(rowMinX, int.MaxValue); Array.Fill(rowMaxX, int.MinValue);
-        Array.Fill(colMinZ, int.MaxValue); Array.Fill(colMaxZ, int.MinValue);
+        // Work on a padded footprint so the hull never touches the grid edge: the sea can then
+        // flood cleanly all the way around it and morphology has no border ambiguity.
+        int m = HullCloseRadius + 1;
+        int px = dimX + 2 * m, pz = dimZ + 2 * m, pn = px * pz;
+        var padWall = new bool[pn];
         for (int z = 0; z < dimZ; z++)
         for (int x = 0; x < dimX; x++)
+            if (wall[z * dimX + x]) padWall[(z + m) * px + (x + m)] = true;
+
+        bool[] closed = Close(padWall, px, pz, HullCloseRadius);
+
+        // Flood-fill the open sea inward from the padded border (all empty) around the hull.
+        var sea = new bool[pn];
+        var queue = new Queue<int>();
+        void Seed(int x, int z) { int c = z * px + x; if (!closed[c] && !sea[c]) { sea[c] = true; queue.Enqueue(c); } }
+        for (int x = 0; x < px; x++) { Seed(x, 0); Seed(x, pz - 1); }
+        for (int z = 0; z < pz; z++) { Seed(0, z); Seed(px - 1, z); }
+        int[] ox = [1, -1, 0, 0], oz = [0, 0, 1, -1];
+        while (queue.Count > 0)
         {
-            if (!wall[z * dimX + x]) continue;
-            if (x < rowMinX[z]) rowMinX[z] = x; if (x > rowMaxX[z]) rowMaxX[z] = x;
-            if (z < colMinZ[x]) colMinZ[x] = z; if (z > colMaxZ[x]) colMaxZ[x] = z;
+            int c = queue.Dequeue();
+            int cx = c % px, cz = c / px;
+            for (int k = 0; k < 4; k++)
+            {
+                int nx = cx + ox[k], nz = cz + oz[k];
+                if (nx >= 0 && nz >= 0 && nx < px && nz < pz) Seed(nx, nz);
+            }
         }
 
+        // A non-wall column the sea can't reach is hull interior. Map back to original coords.
         var interior = new bool[n];
         bool any = false;
         for (int z = 0; z < dimZ; z++)
         for (int x = 0; x < dimX; x++)
         {
-            if (wall[z * dimX + x]) continue;
-            if (x > rowMinX[z] && x < rowMaxX[z] && z > colMinZ[x] && z < colMaxZ[x])
-            {
-                interior[z * dimX + x] = true;
-                any = true;
-            }
+            if (wall[z * dimX + x] || sea[(z + m) * px + (x + m)]) continue;
+            interior[z * dimX + x] = true;
+            any = true;
         }
+
         if (!any) return null;
         return (interior, deckTop < 0 ? dimY : deckTop + 1);
+    }
+
+    /// <summary>Morphological close (dilate then erode) by a Chebyshev radius, sealing gaps up to ~2R wide.</summary>
+    private static bool[] Close(bool[] src, int dimX, int dimZ, int r)
+    {
+        int n = dimX * dimZ;
+        var dil = new bool[n];
+        for (int z = 0; z < dimZ; z++)
+        for (int x = 0; x < dimX; x++)
+        {
+            if (!src[z * dimX + x]) continue;
+            for (int dz = -r; dz <= r; dz++)
+            for (int dx = -r; dx <= r; dx++)
+            {
+                int nx = x + dx, nz = z + dz;
+                if (nx >= 0 && nz >= 0 && nx < dimX && nz < dimZ) dil[nz * dimX + nx] = true;
+            }
+        }
+        var outv = new bool[n];
+        for (int z = 0; z < dimZ; z++)
+        for (int x = 0; x < dimX; x++)
+        {
+            bool all = true;
+            for (int dz = -r; dz <= r && all; dz++)
+            for (int dx = -r; dx <= r && all; dx++)
+            {
+                int nx = x + dx, nz = z + dz;
+                if (nx < 0 || nz < 0 || nx >= dimX || nz >= dimZ || !dil[nz * dimX + nx]) all = false;
+            }
+            outv[z * dimX + x] = all;
+        }
+        return outv;
     }
 
     private static int TopSolidY(ushort[] blocks, int dimX, int dimY, int dimZ, int x, int z)
