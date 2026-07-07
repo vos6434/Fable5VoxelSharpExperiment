@@ -756,8 +756,11 @@ public sealed class Game
         draws += _entities.Count;
         _entities.Render(_shader);
 
-        // Water mask: stamp each contraption's enclosed-hull lid into depth only (no color),
+        // Water mask: stamp each contraption's enclosed-hull plug into depth only (no color),
         // so the world-water surface below is occluded and doesn't show through an open deck.
+        // uAlphaTest must be disabled — otherwise the untextured plug (atlas layer 0) is
+        // alpha-tested away and writes no depth at all, defeating the whole pass.
+        _shader.SetFloat("uAlphaTest", -1f);
         _gl.ColorMask(false, false, false, false);
         _gl.Disable(EnableCap.CullFace);
         _gl.DepthMask(true);
