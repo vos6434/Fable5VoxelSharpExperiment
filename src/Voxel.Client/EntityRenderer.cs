@@ -287,34 +287,28 @@ public sealed class EntityRenderer : IDisposable
     private const int HullCloseRadius = 2;
 
     /// <summary>
-    /// Hull-interior columns for the water lid. A "wall" column holds any block. The wall mask is
-    /// morphologically closed (dilate then erode) to seal narrow gaps and concave notches, then the
-    /// open sea is flood-filled inward from the footprint border; every non-wall column the sea
-    /// can't reach is hull interior. This handles arbitrary hull outlines — open bows, doorways,
-    /// and stepped edges — without masking the ocean around a convex hull (closing leaves the outer
-    /// boundary in place). Deck height is one above the *most common* wall-top, so a low bow step
-    /// or a tall single-column mast doesn't skew it. Null when nothing is enclosed.
+    /// Footprint columns to plug against the world water. A column that holds any block is part of
+    /// the hull outline; this outline is morphologically closed (dilate then erode) to seal narrow
+    /// gaps and concave notches, and the open sea is flood-filled inward from the (padded) border.
+    /// Every column the sea can't reach — hull walls, the floor, and the enclosed cockpit alike —
+    /// is masked, because a boat with a floor has world water sitting in the cockpit *above* that
+    /// floor and every interior column then holds a block. The plug rises to the tallest block so
+    /// it always clears the interior waterline. Null when nothing is enclosed (open water only).
     /// </summary>
     public static (bool[] Interior, int DeckY)? ComputeInteriorColumns(ushort[] blocks, int dimX, int dimY, int dimZ)
     {
         int n = dimX * dimZ;
         var wall = new bool[n];
-        var topCounts = new Dictionary<int, int>();
+        int maxTop = -1;
         for (int z = 0; z < dimZ; z++)
         for (int x = 0; x < dimX; x++)
-        for (int y = 0; y < dimY; y++)
-            if (blocks[(y * dimZ + z) * dimX + x] != 0)
-            {
-                wall[z * dimX + x] = true;
-                int top = TopSolidY(blocks, dimX, dimY, dimZ, x, z);
-                topCounts[top] = topCounts.GetValueOrDefault(top) + 1;
-                break; // this column is a wall; TopSolidY scans its full height once
-            }
-
-        // Deck = one above the most frequent wall-top (ties -> the taller one, more freeboard).
-        int deckTop = -1, bestCount = 0;
-        foreach (var (top, count) in topCounts)
-            if (count > bestCount || (count == bestCount && top > deckTop)) { deckTop = top; bestCount = count; }
+        {
+            int top = TopSolidY(blocks, dimX, dimY, dimZ, x, z);
+            if (top < 0) continue;
+            wall[z * dimX + x] = true;
+            if (top > maxTop) maxTop = top;
+        }
+        if (maxTop < 0) return null;
 
         // Work on a padded footprint so the hull never touches the grid edge: the sea can then
         // flood cleanly all the way around it and morphology has no border ambiguity.
@@ -345,19 +339,19 @@ public sealed class EntityRenderer : IDisposable
             }
         }
 
-        // A non-wall column the sea can't reach is hull interior. Map back to original coords.
+        // Every footprint column the sea can't reach is part of the boat -> mask it. Map back.
         var interior = new bool[n];
         bool any = false;
         for (int z = 0; z < dimZ; z++)
         for (int x = 0; x < dimX; x++)
         {
-            if (wall[z * dimX + x] || sea[(z + m) * px + (x + m)]) continue;
+            if (sea[(z + m) * px + (x + m)]) continue;
             interior[z * dimX + x] = true;
             any = true;
         }
 
         if (!any) return null;
-        return (interior, deckTop < 0 ? dimY : deckTop + 1);
+        return (interior, maxTop + 1);
     }
 
     /// <summary>Morphological close (dilate then erode) by a Chebyshev radius, sealing gaps up to ~2R wide.</summary>

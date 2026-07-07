@@ -3,15 +3,14 @@ using Voxel.Client;
 namespace Voxel.Shared.Tests;
 
 /// <summary>
-/// The water lid masks world water seen through an open deck. It only covers columns the hull
-/// truly encloses in the XZ footprint — an open-topped ring counts, but a ring with a gap (open
-/// to the sea) and a solid-floored hull (water already hidden by the floor) do not.
+/// The water mask plugs the world sea out of a boat's footprint. It covers every column the hull
+/// encloses — walls, floor, and open cockpit — because a floored boat has world water sitting in
+/// the cockpit above the floor. Open ocean around the hull must stay unmasked.
 /// </summary>
 public class EntityWaterMaskTests
 {
     private const ushort P = 2;
 
-    /// <summary>dx x dy x dz grid; builder sets the blocks.</summary>
     private static ushort[] Grid(int dx, int dy, int dz, Action<int, int, int, ushort[]> fill)
     {
         var b = new ushort[dx * dy * dz];
@@ -19,109 +18,88 @@ public class EntityWaterMaskTests
         return b;
     }
 
-    [Fact]
-    public void Open_ring_hull_encloses_its_interior()
+    /// <summary>A 5x5 boat (floor + 2-high perimeter walls) centred in a 7x7 grid with a sea margin.</summary>
+    private static ushort[] FlooredBoat(int dx = 7, int dy = 4, int dz = 7)
     {
-        const int dx = 5, dy = 1, dz = 5;
-        var blocks = Grid(dx, dy, dz, (x, y, z, b) =>
+        return Grid(dx, dy, dz, (_, _, _, b) =>
         {
-            for (int zz = 0; zz < dz; zz++)
-            for (int xx = 0; xx < dx; xx++)
-                if (xx == 0 || xx == dx - 1 || zz == 0 || zz == dz - 1)
-                    b[(0 * dz + zz) * dx + xx] = P;
+            int I(int x, int y, int z) => (y * dz + z) * dx + x;
+            for (int z = 1; z <= 5; z++)
+            for (int x = 1; x <= 5; x++)
+            {
+                b[I(x, 0, z)] = P; // floor
+                if (x == 1 || x == 5 || z == 1 || z == 5)
+                    for (int y = 1; y <= 2; y++) b[I(x, y, z)] = P; // walls
+            }
         });
-
-        var result = EntityRenderer.ComputeInteriorColumns(blocks, dx, dy, dz);
-        Assert.NotNull(result);
-        var (interior, deckY) = result.Value;
-
-        // The 3x3 inside the ring is enclosed; the ring itself and outside are not.
-        Assert.True(interior[2 * dx + 2], "center should be interior");
-        Assert.False(interior[0], "corner wall is not interior");
-        Assert.Equal(9, interior.Count(v => v));
-        Assert.Equal(1, deckY); // one above the 1-tall wall (top y=0)
     }
 
     [Fact]
-    public void Ring_with_a_gap_still_masks_the_interior()
+    public void Floored_cockpit_and_hull_are_masked()
     {
-        // A doorway / open bow must not disable the lid — real hulls aren't watertight rings.
-        const int dx = 5, dy = 1, dz = 5;
-        var blocks = Grid(dx, dy, dz, (x, y, z, b) =>
-        {
-            for (int zz = 0; zz < dz; zz++)
-            for (int xx = 0; xx < dx; xx++)
-                if (xx == 0 || xx == dx - 1 || zz == 0 || zz == dz - 1)
-                    b[(0 * dz + zz) * dx + xx] = P;
-            b[(0 * dz + 0) * dx + 2] = 0; // punch a hole in the front wall
-        });
-
-        var result = EntityRenderer.ComputeInteriorColumns(blocks, dx, dy, dz);
+        var result = EntityRenderer.ComputeInteriorColumns(FlooredBoat(), 7, 4, 7);
         Assert.NotNull(result);
-        var (interior, _) = result.Value;
-        // The cells flanking the gap are still filled (walls on both sides on both axes).
-        Assert.True(interior[1 * dx + 1], "cell beside the gap should still be masked");
-        Assert.True(interior[2 * dx + 3], "interior away from the gap should be masked");
+        var (mask, deckY) = result.Value;
+
+        Assert.True(mask[3 * 7 + 3], "cockpit centre (floor below, water above) must be masked");
+        Assert.True(mask[1 * 7 + 1], "hull wall column must be masked");
+        Assert.Equal(3, deckY); // one above the top wall course (y=2)
     }
 
     [Fact]
-    public void Solid_floored_hull_has_no_open_interior()
+    public void Open_ocean_around_the_hull_is_not_masked()
     {
-        const int dx = 4, dy = 2, dz = 4;
-        // Full floor at y=0 (every column has a block), walls at y=1: no empty column exists.
-        var blocks = Grid(dx, dy, dz, (x, y, z, b) =>
-        {
-            for (int zz = 0; zz < dz; zz++)
-            for (int xx = 0; xx < dx; xx++)
-                b[(0 * dz + zz) * dx + xx] = P;
-        });
+        var result = EntityRenderer.ComputeInteriorColumns(FlooredBoat(), 7, 4, 7);
+        Assert.NotNull(result);
+        var (mask, _) = result.Value;
 
-        Assert.Null(EntityRenderer.ComputeInteriorColumns(blocks, dx, dy, dz));
+        Assert.False(mask[0 * 7 + 0], "corner outside the hull is open sea");
+        Assert.False(mask[3 * 7 + 0], "cell beside the hull is open sea");
     }
 
     [Fact]
     public void Concave_notch_in_the_hull_is_still_masked()
     {
-        // A rectangular hull with a 1-wide step cut into one wall — the notch pocket, open to the
-        // sea through a narrow channel, must still be masked (morphological close seals it).
-        const int dx = 7, dy = 1, dz = 7;
-        var blocks = Grid(dx, dy, dz, (x, y, z, b) =>
+        // A 1-wide step cut into a wall — morphological close seals the channel so the pocket masks.
+        const int dx = 9, dy = 1, dz = 9;
+        var blocks = Grid(dx, dy, dz, (_, _, _, b) =>
         {
-            for (int zz = 0; zz < dz; zz++)
-            for (int xx = 0; xx < dx; xx++)
-                if (xx == 0 || xx == dx - 1 || zz == 0 || zz == dz - 1)
-                    b[(0 * dz + zz) * dx + xx] = P;
-            // Push the middle of the top wall inward one cell (a concave notch).
-            b[(0 * dz + 0) * dx + 3] = 0;
-            b[(0 * dz + 1) * dx + 3] = P;
+            int I(int x, int z) => (0 * dz + z) * dx + x;
+            for (int z = 1; z <= 7; z++)
+            for (int x = 1; x <= 7; x++)
+                if (x == 1 || x == 7 || z == 1 || z == 7) b[I(x, z)] = P;
+            b[I(4, 1)] = 0;      // notch: remove one wall cell
+            b[I(4, 2)] = P;      // ...and step it inward
         });
 
         var result = EntityRenderer.ComputeInteriorColumns(blocks, dx, dy, dz);
         Assert.NotNull(result);
-        var (interior, _) = result.Value;
-        Assert.True(interior[3 * dx + 3], "hull center should be masked");
-        Assert.True(interior[0 * dx + 3], "the concave notch pocket should be masked, not left as water");
+        var (mask, _) = result.Value;
+        Assert.True(mask[4 * dx + 4], "hull interior masked");
+        Assert.True(mask[1 * dx + 4], "the concave notch pocket masked, not left as water");
     }
 
     [Fact]
-    public void Deck_height_ignores_a_tall_mast()
+    public void Empty_grid_masks_nothing()
     {
-        const int dx = 5, dy = 8, dz = 5;
-        var blocks = Grid(dx, dy, dz, (x, y, z, b) =>
+        Assert.Null(EntityRenderer.ComputeInteriorColumns(new ushort[3 * 3 * 3], 3, 3, 3));
+    }
+
+    [Fact]
+    public void Deck_reaches_the_tallest_block()
+    {
+        // Floored boat with a tall mast: the plug must rise above the mast, not stop at the deck.
+        const int dx = 7, dy = 10, dz = 7;
+        var blocks = Grid(dx, dy, dz, (_, _, _, b) =>
         {
-            // 1-tall ring wall.
-            for (int zz = 0; zz < dz; zz++)
-            for (int xx = 0; xx < dx; xx++)
-                if (xx == 0 || xx == dx - 1 || zz == 0 || zz == dz - 1)
-                    b[(0 * dz + zz) * dx + xx] = P;
-            // Tall mast in the middle (a wall column bordering the interior).
-            for (int yy = 0; yy < dy; yy++)
-                b[(yy * dz + 2) * dx + 2] = P;
+            int I(int x, int y, int z) => (y * dz + z) * dx + x;
+            for (int z = 1; z <= 5; z++)
+            for (int x = 1; x <= 5; x++) b[I(x, 0, z)] = P; // floor
+            for (int y = 1; y <= 8; y++) b[I(3, y, 3)] = P;  // mast to y=8
         });
 
         var result = EntityRenderer.ComputeInteriorColumns(blocks, dx, dy, dz);
         Assert.NotNull(result);
-        // Lid rides on the short ring (top y=0), not the mast (top y=7).
-        Assert.Equal(1, result.Value.DeckY);
+        Assert.Equal(9, result.Value.DeckY); // one above the mast top (y=8)
     }
 }
