@@ -86,20 +86,26 @@ public class EntityWaterMaskTests
     }
 
     [Fact]
-    public void Deck_reaches_the_tallest_block()
+    public void Deck_tracks_the_hull_rim_not_the_mast()
     {
-        // Floored boat with a tall mast: the plug must rise above the mast, not stop at the deck.
+        // Floor + 2-high walls + a tall central mast: the plug tops out at the gunwale (y=2),
+        // not the mast (y=8), so the mask doesn't tower above the hull.
         const int dx = 7, dy = 10, dz = 7;
         var blocks = Grid(dx, dy, dz, (_, _, _, b) =>
         {
             int I(int x, int y, int z) => (y * dz + z) * dx + x;
             for (int z = 1; z <= 5; z++)
-            for (int x = 1; x <= 5; x++) b[I(x, 0, z)] = P; // floor
-            for (int y = 1; y <= 8; y++) b[I(3, y, 3)] = P;  // mast to y=8
+            for (int x = 1; x <= 5; x++)
+            {
+                b[I(x, 0, z)] = P; // floor
+                if (x == 1 || x == 5 || z == 1 || z == 5)
+                    for (int y = 1; y <= 2; y++) b[I(x, y, z)] = P; // walls
+            }
+            for (int y = 1; y <= 8; y++) b[I(3, y, 3)] = P; // tall mast (interior)
         });
 
         var result = EntityRenderer.ComputeInteriorColumns(blocks, dx, dy, dz);
         Assert.NotNull(result);
-        Assert.Equal(9, result.Value.DeckY); // one above the mast top (y=8)
+        Assert.Equal(3, result.Value.DeckY); // one above the wall top (y=2), ignoring the mast
     }
 }

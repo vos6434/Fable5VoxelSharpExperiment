@@ -299,14 +299,16 @@ public sealed class EntityRenderer : IDisposable
     {
         int n = dimX * dimZ;
         var wall = new bool[n];
+        var top = new int[n];
         int maxTop = -1;
         for (int z = 0; z < dimZ; z++)
         for (int x = 0; x < dimX; x++)
         {
-            int top = TopSolidY(blocks, dimX, dimY, dimZ, x, z);
-            if (top < 0) continue;
+            int t = TopSolidY(blocks, dimX, dimY, dimZ, x, z);
+            top[z * dimX + x] = t;
+            if (t < 0) continue;
             wall[z * dimX + x] = true;
-            if (top > maxTop) maxTop = top;
+            if (t > maxTop) maxTop = t;
         }
         if (maxTop < 0) return null;
 
@@ -340,18 +342,30 @@ public sealed class EntityRenderer : IDisposable
         }
 
         // Every footprint column the sea can't reach is part of the boat -> mask it. Map back.
+        // Deck height comes from the *most common* height of the outer hull rim (masked columns
+        // touching the sea): the plug tops out at the gunwale, and a tall mast or a sail plane
+        // whose end grazes the rim is outvoted instead of pushing the mask above the hull.
         var interior = new bool[n];
         bool any = false;
+        var rimTops = new Dictionary<int, int>();
         for (int z = 0; z < dimZ; z++)
         for (int x = 0; x < dimX; x++)
         {
             if (sea[(z + m) * px + (x + m)]) continue;
             interior[z * dimX + x] = true;
             any = true;
-        }
 
+            bool onRim = sea[(z + m) * px + (x + m - 1)] || sea[(z + m) * px + (x + m + 1)]
+                      || sea[(z + m - 1) * px + (x + m)] || sea[(z + m + 1) * px + (x + m)];
+            if (onRim) rimTops[top[z * dimX + x]] = rimTops.GetValueOrDefault(top[z * dimX + x]) + 1;
+        }
         if (!any) return null;
-        return (interior, maxTop + 1);
+
+        int deckTop = maxTop, bestCount = 0;
+        foreach (var (t, count) in rimTops)
+            if (count > bestCount || (count == bestCount && t > deckTop)) { deckTop = t; bestCount = count; }
+
+        return (interior, deckTop + 1);
     }
 
     /// <summary>Morphological close (dilate then erode) by a Chebyshev radius, sealing gaps up to ~2R wide.</summary>
