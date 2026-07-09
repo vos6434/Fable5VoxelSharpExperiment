@@ -179,8 +179,9 @@ public sealed class EntityRenderer : IDisposable
     /// <summary>
     /// Hull-interior rects of the nearest floating hulls, as cut-out boxes for the liquid
     /// shader (world sea is discarded inside them so a boat reads hollow from any camera).
-    /// Nearest hulls claim the budget first; MinY reaches one below the grid so the sea
-    /// surface lapping a shallow draft is carved too.
+    /// Nearest hulls claim the budget first. The box starts exactly at the hull bottom —
+    /// no padding below, or a boat lifted/tilted by the physics gun sweeps its padded band
+    /// through the surface at a shallow angle and carves a seabed-deep hole under itself.
     /// </summary>
     public List<WaterCutout> WaterCutouts(float camX, float camY, float camZ, int maxBoxes)
     {
@@ -205,7 +206,7 @@ public sealed class EntityRenderer : IDisposable
             foreach (var (x0, z0, w, d) in e.HullRects!)
             {
                 if (result.Count >= maxBoxes) break;
-                result.Add(new WaterCutout(inv, x0, -1f, z0, x0 + w, e.DeckY, z0 + d));
+                result.Add(new WaterCutout(inv, x0, 0f, z0, x0 + w, e.DeckY, z0 + d));
             }
         }
         return result;
