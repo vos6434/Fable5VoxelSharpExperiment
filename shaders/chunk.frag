@@ -108,8 +108,6 @@ float skyVisibility(vec3 startWorld, vec3 normal) {
     vec3 p = startWorld - uOccupancyOrigin + normal * 0.01;
     ivec3 voxel = ivec3(floor(p));
     int size = int(uOccupancySize);
-    // Below the region: underground, no sky.
-    if (voxel.y < 0) return 0.0;
     // Horizontally outside (or above) the region: distant open terrain gets
     // sky-only shading (plan 02), so treat it as open sky rather than unlit
     // black. (Caves are essentially always inside the region, since you must
@@ -117,6 +115,12 @@ float skyVisibility(vec3 startWorld, vec3 normal) {
     if (voxel.x < 0 || voxel.z < 0 || voxel.x >= size || voxel.z >= size || voxel.y >= size) {
         return 1.0;
     }
+    // Below the region: start the column march at the volume floor instead of
+    // writing the fragment off as underground. The camera-centered volume
+    // lifts off the terrain at altitude, and treating everything under it as
+    // unlit blacked out a volume-sized square of ocean floor (plan 04 M2).
+    // Deep caves still read solid above; open water/air columns read open.
+    if (voxel.y < 0) voxel.y = 0;
     ivec3 wrapBase = ivec3(mod(uOccupancyOrigin, uOccupancySize) + 0.5);
     for (int i = 0; i < 96; i++) {
         if (voxel.y >= size) return 1.0;

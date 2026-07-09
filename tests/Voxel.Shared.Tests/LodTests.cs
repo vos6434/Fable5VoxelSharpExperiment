@@ -43,18 +43,27 @@ public class ChunkLodTests
     }
 
     [Fact]
-    public void Half_solid_cell_stays_solid()
+    public void Surfaces_round_down_solid_needs_strict_majority()
     {
-        // Flat slab: bottom half of every level-1 cell in the y=0 row.
+        // Flat slab: bottom half of every level-1 cell in the y=0 row — exactly
+        // half is NOT a strict majority, so the surface rounds down to air
+        // (coarse terrain must never rise above the full-detail terrain).
         var blocks = Chunk();
         FillBox(blocks, 0, 0, 0, 15, 0, 15, Stone);
-        ushort[] cells = ChunkLod.Downsample(blocks, 1, Water);
-        for (int i = 0; i < 64; i++) Assert.Equal(Stone, cells[i]);   // y=0 cell row
-        for (int i = 64; i < 512; i++) Assert.Equal(0, cells[i]);     // air above
+        Assert.All(ChunkLod.Downsample(blocks, 1, Water), id => Assert.Equal(0, id));
+
+        // Add an x=0 strip at y=1: cells (0, 0, z) now hold 4 (slab) + 2 = 6 of
+        // 8 — a strict majority → stone. Cells (1, 0, z) stay at 4 → air.
+        var majority = Chunk();
+        FillBox(majority, 0, 0, 0, 15, 0, 15, Stone);
+        FillBox(majority, 0, 1, 0, 0, 1, 15, Stone);
+        ushort[] cells = ChunkLod.Downsample(majority, 1, Water);
+        for (int z = 0; z < 8; z++) Assert.Equal(Stone, cells[z * 8]);
+        Assert.Equal(0, cells[1]);
     }
 
     [Fact]
-    public void Sub_half_solid_sliver_erases()
+    public void Sub_majority_solid_sliver_erases()
     {
         var blocks = Chunk();
         blocks[ChunkData.Index(4, 4, 4)] = Stone; // 1 of 8 in its level-1 cell
@@ -67,16 +76,25 @@ public class ChunkLodTests
     }
 
     [Fact]
-    public void Water_wins_only_without_a_solid_majority()
+    public void Water_wins_at_half_when_solids_lack_a_majority()
     {
         // Half water, half air → water (ocean surface cells survive).
         var blocks = Chunk();
         FillBox(blocks, 0, 0, 0, 1, 0, 1, Water);
         Assert.Equal(Water, ChunkLod.Downsample(blocks, 1, Water)[0]);
 
-        // Half water, half stone → stone (shoreline slivers drop the water).
+        // Half water, half stone: no strict solid majority → water (the coarse
+        // seabed rounds down; the stone shows on the fine-detail side instead).
         FillBox(blocks, 0, 1, 0, 1, 1, 1, Stone);
-        Assert.Equal(Stone, ChunkLod.Downsample(blocks, 1, Water)[0]);
+        Assert.Equal(Water, ChunkLod.Downsample(blocks, 1, Water)[0]);
+
+        // 5 stone, 3 water → stone (strict solid majority beats water).
+        var shore = Chunk();
+        FillBox(shore, 0, 0, 0, 1, 1, 1, Stone);
+        shore[ChunkData.Index(0, 0, 0)] = Water;
+        shore[ChunkData.Index(1, 0, 0)] = Water;
+        shore[ChunkData.Index(0, 1, 0)] = Water;
+        Assert.Equal(Stone, ChunkLod.Downsample(shore, 1, Water)[0]);
 
         // 3 water, 5 air → air (below half, water counts as air).
         var sparse = Chunk();
@@ -89,9 +107,11 @@ public class ChunkLodTests
     [Fact]
     public void Solid_tie_breaks_to_lower_id()
     {
+        // 4 dirt + 4 stone = 8 solid of 8 (strict majority); the dirt/stone
+        // tie breaks to the lower numeric id (stone).
         var blocks = Chunk();
-        FillBox(blocks, 0, 0, 0, 1, 0, 1, Dirt);  // 4 dirt
-        FillBox(blocks, 0, 1, 0, 1, 1, 1, Stone); // 4 stone
+        FillBox(blocks, 0, 0, 0, 1, 0, 1, Dirt);
+        FillBox(blocks, 0, 1, 0, 1, 1, 1, Stone);
         Assert.Equal(Stone, ChunkLod.Downsample(blocks, 1, Water)[0]);
     }
 

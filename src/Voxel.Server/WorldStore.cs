@@ -64,6 +64,14 @@ public sealed class WorldStore : IDisposable
 
             WorldMigrations.Run(_db);
 
+            // LOD blobs derive from chunks + the vote algorithm; a rules change
+            // makes every cached blob stale, so wipe and regenerate lazily.
+            if (GetMeta("lodAlgoVersion") != ChunkLod.AlgoVersion.ToString())
+            {
+                Execute("DELETE FROM lods;");
+                SetMeta("lodAlgoVersion", ChunkLod.AlgoVersion.ToString());
+            }
+
             CheckMeta("generatorVersion", WorldGen.GeneratorVersion.ToString());
             CheckMeta("seed", generator.Seed.ToString());
             // Matches JSON.stringify(paletteArray) so worlds are portable across implementations.

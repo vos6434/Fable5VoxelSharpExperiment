@@ -80,6 +80,28 @@ scaled sync/rendering for physics contraptions.
    verification runs (`--screenshot`) no longer need a separate server.
 2. **LOD1 ring rendered** — 16-chunk vistas; skirts; screenshot comparison
    with a full-detail reference render of the same area.
+
+   **DONE (2026-07-09).** LOD0 radius 8, LOD1 ring to 16 (data to 17),
+   band-limited, streamed on leftover budget. Greedy mesher parameterized by
+   cells-per-axis/cell-size; skirts on LOD side borders (skipped under
+   water/ice caps). Deviations from the sketch above, learned on screenshots:
+   - Vote rounds surfaces *down* (solid needs a strict majority; ChunkLod
+     AlgoVersion invalidates cached blobs) so coarse terrain never rises
+     above the full detail it approximates.
+   - **Underlap** instead of exact stitching at the inner boundary: LOD1
+     also renders depth-biased *under* full-detail chunks in a radius-10
+     shell, sealing boundary cracks (fine meshes cull border faces against
+     full neighbor data that isn't what actually renders beside them).
+     Translucent pass excluded (no depth writes → double-blend band).
+   - Two chunk.frag skyVisibility fixes: horizontally-outside-region check
+     now precedes the below-region check, and below-region fragments march
+     from the volume floor instead of reading as underground (the camera-
+     centered volume lifts off the terrain at altitude, which blacked out
+     a volume-sized square of seabed — it read as a false "LOD seam ring"
+     for a while).
+   Left for later milestones: draws ~1300 at spawn vista (merging, M3);
+   fog-color vs sky-gradient mismatch leaves grey silhouettes at the far
+   ring edge (M6); LOD1 chunks don't yet re-request on distant edits (M4).
 3. **LOD2 + merging** — full 32-chunk reach; draw/tri budget measured.
 4. **Edit invalidation** — break a mountain top; the distant view updates
    within seconds of the LOD cache refresh.

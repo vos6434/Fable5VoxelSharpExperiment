@@ -4,14 +4,20 @@ namespace Voxel.Shared;
 /// Chunk downsampling for distant terrain (plan 04). An LOD chunk shares its
 /// source chunk's coordinates but stores (16 &gt;&gt; level)³ cells of
 /// (1 &lt;&lt; level)-block size: LOD1 = 8³ cells of 2 blocks, LOD2 = 4³ of 4.
-/// Cells vote: a cell becomes the most common solid block when solids fill at
-/// least half of it, else water when water fills at least half (keeps oceans
-/// intact, drops shoreline slivers), else air — so sub-half features erase,
-/// which is the accepted v1 trade-off.
+/// Cells vote: a cell becomes the most common solid block when solids fill a
+/// strict majority — surfaces round *down*, so coarse terrain never rises
+/// above the full-detail terrain it approximates (a raised coarse seabed drew
+/// a bright cliff ring at the ring boundary; sunken seams hide under water or
+/// behind skirts). Otherwise water when water fills at least half (oceans
+/// stay at sea level), else air. Sub-half features erase — accepted v1
+/// trade-off.
 /// </summary>
 public static class ChunkLod
 {
     public const int MaxLevel = 2;
+
+    /// <summary>Bump when the vote rules change: stored LOD blobs are stale and get regenerated.</summary>
+    public const int AlgoVersion = 2;
 
     /// <summary>
     /// Vertical band LOD rings cover, in chunk coords (world y −64…+80).
@@ -78,7 +84,7 @@ public static class ChunkLod
             }
 
             ushort cell = 0;
-            if (solidCount * 2 >= cellVolume)
+            if (solidCount * 2 > cellVolume)
             {
                 // Most common solid; ties break to the lower numeric id so the
                 // result is deterministic across runs and implementations.

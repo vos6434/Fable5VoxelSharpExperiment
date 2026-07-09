@@ -33,8 +33,6 @@ public sealed record MeshResult(MeshPass? Solid, MeshPass? LiquidSurface, MeshPa
 
 public static class GreedyMesher
 {
-    private const int S = Constants.ChunkSize;
-
     // Per-face brightness, FACE_DIRS order (px, nx, py, ny, pz, nz):
     // classic voxel shading — top brightest, bottom darkest.
     private static readonly float[] FaceBrightness = [0.6f, 0.6f, 1.0f, 0.5f, 0.8f, 0.8f];
@@ -92,6 +90,9 @@ public static class GreedyMesher
     }
 
     /// <param name="neighbors">Neighbor chunk contents in FACE_DIRS order (px,nx,py,ny,pz,nz); null = treat as air.</param>
+    /// <param name="cellsPerAxis">Grid edge in cells: 16 for full chunks, 8/4 for LOD1/LOD2 (plan 04).</param>
+    /// <param name="cellSize">World blocks per cell (1, 2, 4). Geometry scales; UVs stay block-anchored.</param>
+    /// <param name="skirts">Emit border skirts (LOD rings): downward curtains that hide ring-boundary gaps.</param>
     public static MeshResult Mesh(
         int cx, int cy, int cz,
         ushort[] blocks,
@@ -100,27 +101,33 @@ public static class GreedyMesher
         ushort[] renderTable,
         byte[] translucentMask,
         byte[] flatAoMask,
-        byte[] emissiveMask)
+        byte[] emissiveMask,
+        int cellsPerAxis = Constants.ChunkSize,
+        int cellSize = 1,
+        bool skirts = false)
     {
-        int ox = cx * S, oy = cy * S, oz = cz * S;
+        int S = cellsPerAxis;
+        int ox = cx * Constants.ChunkSize, oy = cy * Constants.ChunkSize, oz = cz * Constants.ChunkSize;
         ReadOnlySpan<int> chunkOrigin = stackalloc int[] { ox, oy, oz };
         ushort[]? nPx = neighbors[0], nNx = neighbors[1], nPy = neighbors[2];
         ushort[]? nNy = neighbors[3], nPz = neighbors[4], nNz = neighbors[5];
 
-        // Voxel lookup that reaches one block into neighbor chunks along one
+        int Idx(int x, int y, int z) => (y * S + z) * S + x;
+
+        // Voxel lookup that reaches one cell into neighbor chunks along one
         // axis. AO corner samples can step outside on two axes at once; the
         // pool only has face neighbors, so those read as air.
         ushort Voxel(int x, int y, int z)
         {
             int outside = (x < 0 || x >= S ? 1 : 0) + (y < 0 || y >= S ? 1 : 0) + (z < 0 || z >= S ? 1 : 0);
             if (outside > 1) return 0;
-            if (x >= S) return nPx?[ChunkData.Index(x - S, y, z)] ?? 0;
-            if (x < 0) return nNx?[ChunkData.Index(x + S, y, z)] ?? 0;
-            if (y >= S) return nPy?[ChunkData.Index(x, y - S, z)] ?? 0;
-            if (y < 0) return nNy?[ChunkData.Index(x, y + S, z)] ?? 0;
-            if (z >= S) return nPz?[ChunkData.Index(x, y, z - S)] ?? 0;
-            if (z < 0) return nNz?[ChunkData.Index(x, y, z + S)] ?? 0;
-            return blocks[ChunkData.Index(x, y, z)];
+            if (x >= S) return nPx?[Idx(x - S, y, z)] ?? 0;
+            if (x < 0) return nNx?[Idx(x + S, y, z)] ?? 0;
+            if (y >= S) return nPy?[Idx(x, y - S, z)] ?? 0;
+            if (y < 0) return nNy?[Idx(x, y + S, z)] ?? 0;
+            if (z >= S) return nPz?[Idx(x, y, z - S)] ?? 0;
+            if (z < 0) return nNz?[Idx(x, y, z + S)] ?? 0;
+            return blocks[Idx(x, y, z)];
         }
 
         var solid = new PassBuilder();
@@ -167,7 +174,7 @@ public static class GreedyMesher
                     for (int mu = 0; mu < S; mu++)
                     {
                         pos[d] = slice; pos[u] = mu; pos[v] = mv;
-                        ushort id = blocks[ChunkData.Index(pos[0], pos[1], pos[2])];
+                        ushort id = blocks[Idx(pos[0], pos[1], pos[2])];
                         uint cell = 0;
                         if (id != 0)
                         {
@@ -219,13 +226,14 @@ public static class GreedyMesher
                             for (int du = 0; du < w; du++) mask[(mv + dv) * S + mu + du] = 0;
                         }
 
-                        // Quad corners: origin + extents along u/v axes; the face
-                        // plane sits at slice+1 for positive directions, slice for negative.
+                        // Quad corners: origin + extents along u/v axes, scaled to
+                        // world blocks; the face plane sits at slice+1 for positive
+                        // directions, slice for negative.
                         int plane = slice + (dir > 0 ? 1 : 0);
-                        SetCorner(c0, d, plane, u, mu, v, mv);
-                        SetCorner(c1, d, plane, u, mu + w, v, mv);
-                        SetCorner(c2, d, plane, u, mu + w, v, mv + h);
-                        SetCorner(c3, d, plane, u, mu, v, mv + h);
+                        SetCorner(c0, d, plane * cellSize, u, mu * cellSize, v, mv * cellSize);
+                        SetCorner(c1, d, plane * cellSize, u, (mu + w) * cellSize, v, mv * cellSize);
+                        SetCorner(c2, d, plane * cellSize, u, (mu + w) * cellSize, v, (mv + h) * cellSize);
+                        SetCorner(c3, d, plane * cellSize, u, mu * cellSize, v, (mv + h) * cellSize);
 
                         // Skip baked AO on ice/water — corner samples differ at chunk
                         // edges and produced visible grid seams.
@@ -243,12 +251,13 @@ public static class GreedyMesher
                             brightness4[3] = brightness * AoFactor[(ao >> 6) & 3] + emissive;
                         }
 
-                        // World-anchored UVs (one unit per block) so atlas repeat
-                        // tiles continuously across chunk boundaries.
-                        float u0 = chunkOrigin[u] + mu;
-                        float u1 = chunkOrigin[u] + mu + w;
-                        float v0 = chunkOrigin[v] + mv;
-                        float v1 = chunkOrigin[v] + mv + h;
+                        // World-anchored UVs (one unit per block, LOD cells span
+                        // cellSize units) so atlas repeat tiles continuously across
+                        // chunk boundaries and rings keep the same texel density.
+                        float u0 = chunkOrigin[u] + mu * cellSize;
+                        float u1 = chunkOrigin[u] + (mu + w) * cellSize;
+                        float v0 = chunkOrigin[v] + mv * cellSize;
+                        float v1 = chunkOrigin[v] + (mv + h) * cellSize;
 
                         // NOTE: no chunk-border overlap nudge here. Overlapping
                         // liquid-surface quads from adjacent chunks double-blend
@@ -267,6 +276,70 @@ public static class GreedyMesher
                             u0, v0, u1, v1,
                             renderTable[id * 6 + faceIndex], brightness4, flip);
                     }
+                }
+            }
+        }
+
+        // Skirts (LOD rings, plan 04): a downward curtain along each side
+        // border at the surface height, Distant Horizons-style. Where the
+        // neighboring ring's finer/coarser surface sits lower than ours, the
+        // culled border face would otherwise leave a see-through gap; the
+        // curtain covers it. When surfaces agree it sits buried in terrain.
+        if (skirts)
+        {
+            Span<float> s0 = stackalloc float[3];
+            Span<float> s1 = stackalloc float[3];
+            Span<float> s2 = stackalloc float[3];
+            Span<float> s3 = stackalloc float[3];
+            Span<float> skirtBright = stackalloc float[4];
+            int depth = 2 * cellSize;
+
+            // Border descriptors: normal axis d at plane cell 0 or S, lateral axis u.
+            foreach (var (d, dSlice, faceIndex, u) in (ReadOnlySpan<(int, int, int, int)>)
+                     [(0, S, 0, 2), (0, 0, 1, 2), (2, S, 4, 0), (2, 0, 5, 0)])
+            {
+                int borderCell = dSlice == 0 ? 0 : S - 1;
+                for (int mu = 0; mu < S; mu++)
+                {
+                    // Topmost opaque cell of this border column.
+                    int top = -1;
+                    ushort topId = 0;
+                    int x = d == 0 ? borderCell : mu;
+                    int z = d == 0 ? mu : borderCell;
+                    for (int y = S - 1; y >= 0; y--)
+                    {
+                        ushort id = blocks[Idx(x, y, z)];
+                        if (id != 0 && opaque[id] == 1) { top = y; topId = id; break; }
+                    }
+                    if (top < 0) continue;
+                    // Skip columns capped by water/ice: the seam sits under the
+                    // liquid surface (invisible), and a lit seabed curtain reads
+                    // as a bright ring line through the water instead.
+                    ushort above = top + 1 < S ? blocks[Idx(x, top + 1, z)] : (nPy?[Idx(x, 0, z)] ?? 0);
+                    if (translucentMask[above] == 1) continue;
+
+                    float yTop = (top + 1) * cellSize;
+                    float yBot = yTop - depth;
+                    float plane = dSlice * cellSize;
+                    float a0 = mu * cellSize, a1 = (mu + 1) * cellSize;
+
+                    s0[d] = plane; s0[u] = a0; s0[1] = yBot;
+                    s1[d] = plane; s1[u] = a1; s1[1] = yBot;
+                    s2[d] = plane; s2[u] = a1; s2[1] = yTop;
+                    s3[d] = plane; s3[u] = a0; s3[1] = yTop;
+
+                    float bright = FaceBrightness[faceIndex];
+                    skirtBright[0] = skirtBright[1] = skirtBright[2] = skirtBright[3] =
+                        emissiveMask[topId] == 1 ? bright + 4f : bright;
+
+                    float su0 = chunkOrigin[u] + a0;
+                    float su1 = chunkOrigin[u] + a1;
+                    float sv0 = chunkOrigin[1] + yBot;
+                    float sv1 = chunkOrigin[1] + yTop;
+                    // Double-sided (two windings): gaps get viewed from either side.
+                    float layer = renderTable[topId * 6 + faceIndex];
+                    solid.Quad(s0, s1, s2, s3, su0, sv0, su1, sv1, layer, skirtBright, flip: false);
+                    solid.Quad(s0, s1, s2, s3, su0, sv0, su1, sv1, layer, skirtBright, flip: true);
                 }
             }
         }
