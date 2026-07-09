@@ -70,6 +70,14 @@ scaled sync/rendering for physics contraptions.
 
 1. **Protocol + server downsampling** — request LOD1 blobs, verified by a
    unit test (majority-vote correctness) and a hexdump-scale sanity check.
+
+   **DONE (2026-07-09).** Protocol v9 (ChunkRequest lodLevel byte, echoed in
+   ChunkData), ChunkLod majority-vote downsampler (solid wins at ≥ half,
+   else water at ≥ half, else air; ties to lower id), lods DB cache
+   (format v3) with per-edit invalidation, vertical band cy −4…+4.
+   Client decodes levelled payloads but still streams level 0 only.
+   Also shipped alongside: offline mode (client-embedded ServerHost), so
+   verification runs (`--screenshot`) no longer need a separate server.
 2. **LOD1 ring rendered** — 16-chunk vistas; skirts; screenshot comparison
    with a full-detail reference render of the same area.
 3. **LOD2 + merging** — full 32-chunk reach; draw/tri budget measured.
