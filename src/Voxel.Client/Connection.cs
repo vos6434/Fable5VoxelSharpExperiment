@@ -13,7 +13,7 @@ public sealed class ClientConnectException(string message, Exception? inner = nu
 /// <summary>One decoded server message, queued for the main thread.</summary>
 public abstract record ServerEvent
 {
-    public sealed record Chunk(int Cx, int Cy, int Cz, ushort[]? Blocks) : ServerEvent;
+    public sealed record Chunk(int Cx, int Cy, int Cz, byte LodLevel, ushort[]? Blocks) : ServerEvent;
     public sealed record BlockUpdated(int X, int Y, int Z, ushort BlockId) : ServerEvent;
     public sealed record PlayerJoined(int Id, string Name) : ServerEvent;
     public sealed record PlayerLeft(int Id) : ServerEvent;
@@ -93,8 +93,8 @@ public sealed class Connection : IDisposable
         }
     }
 
-    public void RequestChunks(IReadOnlyList<(int, int, int)> coords) =>
-        _outbox.Writer.TryWrite(Protocol.EncodeChunkRequest(coords));
+    public void RequestChunks(byte lodLevel, IReadOnlyList<(int, int, int)> coords) =>
+        _outbox.Writer.TryWrite(Protocol.EncodeChunkRequest(lodLevel, coords));
 
     public void SendMove(double x, double y, double z, float yaw, float pitch) =>
         _outbox.Writer.TryWrite(Protocol.EncodeMove(x, y, z, yaw, pitch));
@@ -157,18 +157,23 @@ public sealed class Connection : IDisposable
             case Msg.ChunkData:
             {
                 var header = Protocol.DecodeChunkData(message);
+                if (header.LodLevel > ChunkLod.MaxLevel)
+                {
+                    throw new InvalidDataException($"chunk {header.Cx},{header.Cy},{header.Cz}: bad LOD level {header.LodLevel}");
+                }
                 ushort[]? blocks = null;
                 if (!header.Empty)
                 {
+                    int cellCount = ChunkLod.CellCount(header.LodLevel);
                     byte[] raw = InflateRaw(header.Payload.Span);
-                    if (raw.Length != Constants.ChunkVolume * 2)
+                    if (raw.Length != cellCount * 2)
                     {
-                        throw new InvalidDataException($"chunk {header.Cx},{header.Cy},{header.Cz}: bad payload size {raw.Length}");
+                        throw new InvalidDataException($"chunk {header.Cx},{header.Cy},{header.Cz} lod{header.LodLevel}: bad payload size {raw.Length}");
                     }
-                    blocks = new ushort[Constants.ChunkVolume];
+                    blocks = new ushort[cellCount];
                     Buffer.BlockCopy(raw, 0, blocks, 0, raw.Length);
                 }
-                Events.Enqueue(new ServerEvent.Chunk(header.Cx, header.Cy, header.Cz, blocks));
+                Events.Enqueue(new ServerEvent.Chunk(header.Cx, header.Cy, header.Cz, header.LodLevel, blocks));
                 break;
             }
             case Msg.BlockUpdate:

@@ -22,7 +22,7 @@ public enum Msg : byte
     EntityBlock = 7,  // u32 entityId, i32 lx,ly,lz, u16 blockId (0 = break)
     // server → client
     Welcome = 10,     // JSON { playerId, seed, spawn, palette, protocolVersion }
-    ChunkData = 11,   // i32 cx,cy,cz, u8 empty, [deflate-raw u16 LE blocks]
+    ChunkData = 11,   // i32 cx,cy,cz, u8 lodLevel, u8 empty, [deflate-raw u16 LE blocks/cells]
     BlockUpdate = 12, // i32 x,y,z, u16 blockId
     PlayerJoin = 13,  // JSON { id, name }
     PlayerLeave = 14, // JSON { id }
@@ -77,7 +77,7 @@ public readonly record struct MovePayload(double X, double Y, double Z, float Ya
 
 public readonly record struct BlockChange(int X, int Y, int Z, ushort BlockId);
 
-public readonly record struct ChunkDataHeader(int Cx, int Cy, int Cz, bool Empty, ReadOnlyMemory<byte> Payload);
+public readonly record struct ChunkDataHeader(int Cx, int Cy, int Cz, byte LodLevel, bool Empty, ReadOnlyMemory<byte> Payload);
 
 public static class Protocol
 {
@@ -92,9 +92,10 @@ public static class Protocol
     /// 5 = UseItem + glue marks + EntitySpawn pivot (contraptions),
     /// 6 = physics gun (grab actions + GunHold sync),
     /// 7 = build on contraptions (EntityBlock edit + EntitySpawn resync),
-    /// 8 = WorldEdit-style glue corners (LMB corner 1 / RMB corner 2).
+    /// 8 = WorldEdit-style glue corners (LMB corner 1 / RMB corner 2),
+    /// 9 = chunk LOD (ChunkRequest lodLevel byte, echoed in ChunkData).
     /// </summary>
-    public const int Version = 8;
+    public const int Version = 9;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -122,46 +123,49 @@ public static class Protocol
 
     // ---- ChunkRequest -------------------------------------------------------
 
-    public static byte[] EncodeChunkRequest(IReadOnlyList<(int Cx, int Cy, int Cz)> coords)
+    public static byte[] EncodeChunkRequest(byte lodLevel, IReadOnlyList<(int Cx, int Cy, int Cz)> coords)
     {
-        var outBuf = new byte[3 + coords.Count * 12];
+        var outBuf = new byte[4 + coords.Count * 12];
         outBuf[0] = (byte)Msg.ChunkRequest;
         BinaryPrimitives.WriteUInt16LittleEndian(outBuf.AsSpan(1), (ushort)coords.Count);
+        outBuf[3] = lodLevel;
         for (int i = 0; i < coords.Count; i++)
         {
-            BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(3 + i * 12), coords[i].Cx);
-            BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(7 + i * 12), coords[i].Cy);
-            BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(11 + i * 12), coords[i].Cz);
+            BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(4 + i * 12), coords[i].Cx);
+            BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(8 + i * 12), coords[i].Cy);
+            BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(12 + i * 12), coords[i].Cz);
         }
         return outBuf;
     }
 
-    public static List<(int Cx, int Cy, int Cz)> DecodeChunkRequest(ReadOnlySpan<byte> message)
+    public static (byte LodLevel, List<(int Cx, int Cy, int Cz)> Coords) DecodeChunkRequest(ReadOnlySpan<byte> message)
     {
         int count = BinaryPrimitives.ReadUInt16LittleEndian(message[1..]);
+        byte lodLevel = message[3];
         var coords = new List<(int, int, int)>(count);
         for (int i = 0; i < count; i++)
         {
             coords.Add((
-                BinaryPrimitives.ReadInt32LittleEndian(message[(3 + i * 12)..]),
-                BinaryPrimitives.ReadInt32LittleEndian(message[(7 + i * 12)..]),
-                BinaryPrimitives.ReadInt32LittleEndian(message[(11 + i * 12)..])));
+                BinaryPrimitives.ReadInt32LittleEndian(message[(4 + i * 12)..]),
+                BinaryPrimitives.ReadInt32LittleEndian(message[(8 + i * 12)..]),
+                BinaryPrimitives.ReadInt32LittleEndian(message[(12 + i * 12)..])));
         }
-        return coords;
+        return (lodLevel, coords);
     }
 
     // ---- ChunkData ----------------------------------------------------------
 
-    public static byte[] EncodeChunkData(int cx, int cy, int cz, byte[]? compressed)
+    public static byte[] EncodeChunkData(int cx, int cy, int cz, byte lodLevel, byte[]? compressed)
     {
         int payloadLength = compressed?.Length ?? 0;
-        var outBuf = new byte[14 + payloadLength];
+        var outBuf = new byte[15 + payloadLength];
         outBuf[0] = (byte)Msg.ChunkData;
         BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(1), cx);
         BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(5), cy);
         BinaryPrimitives.WriteInt32LittleEndian(outBuf.AsSpan(9), cz);
-        outBuf[13] = (byte)(compressed is null ? 1 : 0); // 1 = empty chunk
-        compressed?.CopyTo(outBuf, 14);
+        outBuf[13] = lodLevel;
+        outBuf[14] = (byte)(compressed is null ? 1 : 0); // 1 = empty chunk
+        compressed?.CopyTo(outBuf, 15);
         return outBuf;
     }
 
@@ -172,8 +176,9 @@ public static class Protocol
             BinaryPrimitives.ReadInt32LittleEndian(span[1..]),
             BinaryPrimitives.ReadInt32LittleEndian(span[5..]),
             BinaryPrimitives.ReadInt32LittleEndian(span[9..]),
-            span[13] == 1,
-            message[14..]);
+            span[13],
+            span[14] == 1,
+            message[15..]);
     }
 
     // ---- Move ---------------------------------------------------------------

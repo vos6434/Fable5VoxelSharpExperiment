@@ -33,7 +33,7 @@ public class WorldPersistenceTests : IDisposable
     }
 
     [Fact]
-    public void Migration_v1_world_gains_entities_table()
+    public void Migration_v1_world_gains_entities_and_lods_tables()
     {
         string path = TempDb("voxel-migrate");
         var blocks = DataLoader.LoadRegistries(FindDataDir()).Blocks;
@@ -64,8 +64,9 @@ public class WorldPersistenceTests : IDisposable
 
         using (var store = OpenTempStore(path, blocks))
         {
-            Assert.Equal(2, int.Parse(store.GetMeta("formatVersion")!));
+            Assert.Equal(3, int.Parse(store.GetMeta("formatVersion")!));
             Assert.Equal(0, store.EntityCount);
+            store.LoadLodBlob(1, 0, 0, 0); // writes through the new lods table
         }
     }
 

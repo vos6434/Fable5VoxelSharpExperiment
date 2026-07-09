@@ -19,10 +19,14 @@ public sealed class WorldStore : IDisposable
     private readonly SqliteConnection _db;
     private readonly WorldGen _generator;
     private readonly Dictionary<(int, int, int), ChunkData> _cache = new();
+    /// <summary>Deflated LOD blobs by (level, cx, cy, cz); null = all air.</summary>
+    private readonly Dictionary<(int, int, int, int), byte[]?> _lodCache = new();
+    private readonly ushort _waterId;
 
     public WorldStore(string filePath, WorldGen generator, BlockRegistry blocks)
     {
         _generator = generator;
+        _waterId = blocks.Resolve("water");
         Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
         _db = new SqliteConnection($"Data Source={filePath}");
         _db.Open();
@@ -125,6 +129,75 @@ public sealed class WorldStore : IDisposable
         var chunk = Load(cx, cy, cz);
         chunk.Set(Coords.WorldToLocal(wx), Coords.WorldToLocal(wy), Coords.WorldToLocal(wz), blockId);
         Persist(cx, cy, cz, chunk);
+        InvalidateLods(cx, cy, cz);
+    }
+
+    // ---- Chunk LOD cache (plan 04) ---------------------------------------------
+
+    /// <summary>
+    /// Deflated LOD cell blob for a chunk (null = all air): memory → lods
+    /// table → downsample-from-source-and-persist. Chunks outside the LOD
+    /// vertical band serve empty without touching the generator.
+    /// </summary>
+    public byte[]? LoadLodBlob(int level, int cx, int cy, int cz)
+    {
+        if (level is < 1 or > ChunkLod.MaxLevel)
+        {
+            throw new ArgumentOutOfRangeException(nameof(level), level, "LOD level must be 1 or 2");
+        }
+        if (!ChunkLod.InBand(cy)) return null;
+
+        var key = (level, cx, cy, cz);
+        if (_lodCache.TryGetValue(key, out var cached)) return cached;
+
+        byte[]? blob = ReadLodBlob(level, cx, cy, cz);
+        if (blob is null)
+        {
+            var cells = ChunkLod.Downsample(Load(cx, cy, cz).Blocks, level, _waterId);
+            blob = cells.All(id => id == 0) ? [] : DeflateBlocks(cells);
+            PersistLod(level, cx, cy, cz, blob);
+        }
+        byte[]? result = blob.Length == 0 ? null : blob;
+        _lodCache[key] = result;
+        return result;
+    }
+
+    /// <summary>Drops a source chunk's cached LOD blobs; they rebuild lazily on next request.</summary>
+    private void InvalidateLods(int cx, int cy, int cz)
+    {
+        for (int level = 1; level <= ChunkLod.MaxLevel; level++)
+        {
+            _lodCache.Remove((level, cx, cy, cz));
+        }
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = "DELETE FROM lods WHERE cx = $cx AND cy = $cy AND cz = $cz";
+        cmd.Parameters.AddWithValue("$cx", cx);
+        cmd.Parameters.AddWithValue("$cy", cy);
+        cmd.Parameters.AddWithValue("$cz", cz);
+        cmd.ExecuteNonQuery();
+    }
+
+    private void PersistLod(int level, int cx, int cy, int cz, byte[] blob)
+    {
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = "INSERT OR REPLACE INTO lods (level, cx, cy, cz, blocks) VALUES ($level, $cx, $cy, $cz, $blocks)";
+        cmd.Parameters.AddWithValue("$level", level);
+        cmd.Parameters.AddWithValue("$cx", cx);
+        cmd.Parameters.AddWithValue("$cy", cy);
+        cmd.Parameters.AddWithValue("$cz", cz);
+        cmd.Parameters.AddWithValue("$blocks", blob);
+        cmd.ExecuteNonQuery();
+    }
+
+    private byte[]? ReadLodBlob(int level, int cx, int cy, int cz)
+    {
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = "SELECT blocks FROM lods WHERE level = $level AND cx = $cx AND cy = $cy AND cz = $cz";
+        cmd.Parameters.AddWithValue("$level", level);
+        cmd.Parameters.AddWithValue("$cx", cx);
+        cmd.Parameters.AddWithValue("$cy", cy);
+        cmd.Parameters.AddWithValue("$cz", cz);
+        return cmd.ExecuteScalar() as byte[];
     }
 
     public int ChunkCount
@@ -275,10 +348,13 @@ public sealed class WorldStore : IDisposable
     }
 
     /// <summary>Raw-deflate compression of the chunk's u16 LE block array (zlib deflateRaw compatible).</summary>
-    public static byte[] DeflateChunk(ChunkData chunk)
+    public static byte[] DeflateChunk(ChunkData chunk) => DeflateBlocks(chunk.Blocks);
+
+    /// <summary>Raw-deflate compression of any u16 LE block/cell array (full chunks and LOD cells).</summary>
+    public static byte[] DeflateBlocks(ushort[] blocks)
     {
-        var raw = new byte[Constants.ChunkVolume * 2];
-        Buffer.BlockCopy(chunk.Blocks, 0, raw, 0, raw.Length);
+        var raw = new byte[blocks.Length * 2];
+        Buffer.BlockCopy(blocks, 0, raw, 0, raw.Length);
         using var output = new MemoryStream();
         using (var deflate = new DeflateStream(output, CompressionLevel.Fastest, leaveOpen: true))
         {

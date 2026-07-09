@@ -202,6 +202,7 @@ public sealed class StreamingWorld : IDisposable
 
     private void OnChunk(ServerEvent.Chunk chunk)
     {
+        if (chunk.LodLevel != 0) return; // coarse rings arrive in plan 04 M2
         var key = (chunk.Cx, chunk.Cy, chunk.Cz);
         _requested.Remove(key);
         if (_chunks.ContainsKey(key)) return;
@@ -234,7 +235,7 @@ public sealed class StreamingWorld : IDisposable
             _requested.Add(key);
             (batch ??= new List<(int, int, int)>()).Add(key);
         }
-        if (batch is not null) _connection.RequestChunks(batch);
+        if (batch is not null) _connection.RequestChunks(0, batch);
     }
 
     private void ScheduleMeshes()

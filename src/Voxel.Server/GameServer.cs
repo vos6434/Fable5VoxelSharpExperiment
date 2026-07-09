@@ -560,15 +560,24 @@ public sealed class GameServer
         {
             case Msg.ChunkRequest:
             {
-                var coords = Protocol.DecodeChunkRequest(data);
+                var (level, coords) = Protocol.DecodeChunkRequest(data);
+                if (level > ChunkLod.MaxLevel) break; // unknown ring — drop the request
                 int served = 0;
                 foreach (var (cx, cy, cz) in coords)
                 {
                     if (served++ >= MaxChunksPerRequest) break;
-                    ChunkData chunk;
-                    lock (_worldLock) chunk = _store.Load(cx, cy, cz);
-                    byte[]? payload = chunk.CountSolid() == 0 ? null : WorldStore.DeflateChunk(chunk);
-                    client.Outbox.Writer.TryWrite(Protocol.EncodeChunkData(cx, cy, cz, payload));
+                    byte[]? payload;
+                    if (level == 0)
+                    {
+                        ChunkData chunk;
+                        lock (_worldLock) chunk = _store.Load(cx, cy, cz);
+                        payload = chunk.CountSolid() == 0 ? null : WorldStore.DeflateChunk(chunk);
+                    }
+                    else
+                    {
+                        lock (_worldLock) payload = _store.LoadLodBlob(level, cx, cy, cz);
+                    }
+                    client.Outbox.Writer.TryWrite(Protocol.EncodeChunkData(cx, cy, cz, level, payload));
                 }
                 break;
             }

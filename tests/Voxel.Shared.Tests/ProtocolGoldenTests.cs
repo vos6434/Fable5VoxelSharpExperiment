@@ -5,13 +5,35 @@ namespace Voxel.Shared.Tests;
 public class ProtocolGoldenTests
 {
     [Fact]
-    public void ChunkRequest_bytes_match_typescript()
+    public void ChunkRequest_bytes_are_pinned()
     {
-        byte[] encoded = Protocol.EncodeChunkRequest([(1, -2, 3), (-100000, 200000, -300000), (0, 0, 0)]);
+        // Protocol v9 (LOD level byte) diverged from the TypeScript dump; the
+        // golden now pins the C# layout: u16 count, u8 lodLevel, coords.
+        byte[] encoded = Protocol.EncodeChunkRequest(1, [(1, -2, 3), (-100000, 200000, -300000), (0, 0, 0)]);
         Assert.Equal(Golden.Instance.Protocol["chunkRequest"], encoded);
 
-        var decoded = Protocol.DecodeChunkRequest(Golden.Instance.Protocol["chunkRequest"]);
+        var (lodLevel, decoded) = Protocol.DecodeChunkRequest(Golden.Instance.Protocol["chunkRequest"]);
+        Assert.Equal(1, lodLevel);
         Assert.Equal([(1, -2, 3), (-100000, 200000, -300000), (0, 0, 0)], decoded);
+    }
+
+    [Fact]
+    public void ChunkData_round_trips_with_lod_level()
+    {
+        byte[] payload = [10, 20, 30];
+        byte[] encoded = Protocol.EncodeChunkData(-7, 3, 12, 2, payload);
+        Assert.Equal(Msg.ChunkData, Protocol.TypeOf(encoded));
+
+        var header = Protocol.DecodeChunkData(encoded);
+        Assert.Equal((-7, 3, 12), (header.Cx, header.Cy, header.Cz));
+        Assert.Equal(2, header.LodLevel);
+        Assert.False(header.Empty);
+        Assert.Equal(payload, header.Payload.ToArray());
+
+        var empty = Protocol.DecodeChunkData(Protocol.EncodeChunkData(0, -4, 0, 1, null));
+        Assert.Equal(1, empty.LodLevel);
+        Assert.True(empty.Empty);
+        Assert.Equal(0, empty.Payload.Length);
     }
 
     [Fact]
