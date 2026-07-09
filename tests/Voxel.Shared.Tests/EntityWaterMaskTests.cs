@@ -112,6 +112,24 @@ public class EntityWaterMaskTests
     }
 
     [Fact]
+    public void Sail_overhang_does_not_disable_the_carve_beneath_it()
+    {
+        // Floored boat with a sail plane floating high above the cockpit (attached elsewhere):
+        // the air gap between floor and sail must still carve from just above the floor.
+        const int dx = 7, dy = 10, dz = 7;
+        var blocks = FlooredBoat(dx, dy, dz);
+        int I(int x, int y, int z) => (y * dz + z) * dx + x;
+        for (int z = 1; z <= 5; z++)
+        for (int y = 6; y <= 8; y++)
+            blocks[I(3, y, z)] = P; // sail plane across the boat at x=3, high up
+
+        var result = EntityRenderer.ComputeInteriorColumns(blocks, dx, dy, dz);
+        Assert.NotNull(result);
+        var (_, _, floorAir) = result.Value;
+        Assert.Equal(1, floorAir[3 * dx + 3]); // air starts above the floor, not above the sail
+    }
+
+    [Fact]
     public void Stepped_hull_carves_each_floor_level_from_its_own_height()
     {
         // A stepped V-hull cross-section: keel row at floorAir 1, a step at 2, walls at deck.

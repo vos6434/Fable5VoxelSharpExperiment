@@ -383,7 +383,11 @@ public sealed class EntityRenderer : IDisposable
             if (sea[(z + m) * px + (x + m)]) continue;
             int c = z * dimX + x;
             interior[c] = true;
-            floorAir[c] = top[c] + 1; // empty enclosed columns (top -1) carve from the grid bottom
+            // Interior air starts above the *contiguous* solid run from the column's lowest
+            // block (the hull floor) — not above the column's absolute top, or an overhanging
+            // sail/bridge high in the column would wrongly disable the carve underneath it.
+            // Empty enclosed columns (no blocks) carve from the grid bottom.
+            floorAir[c] = FloorAirY(blocks, dimX, dimY, dimZ, x, z);
             any = true;
 
             bool onRim = sea[(z + m) * px + (x + m - 1)] || sea[(z + m) * px + (x + m + 1)]
@@ -438,6 +442,16 @@ public sealed class EntityRenderer : IDisposable
         for (int y = dimY - 1; y >= 0; y--)
             if (blocks[(y * dimZ + z) * dimX + x] != 0) return y;
         return -1;
+    }
+
+    /// <summary>One above the contiguous solid run from the column's lowest block (0 if the column is empty).</summary>
+    private static int FloorAirY(ushort[] blocks, int dimX, int dimY, int dimZ, int x, int z)
+    {
+        int y = 0;
+        while (y < dimY && blocks[(y * dimZ + z) * dimX + x] == 0) y++;
+        if (y == dimY) return 0; // empty column
+        while (y < dimY && blocks[(y * dimZ + z) * dimX + x] != 0) y++;
+        return y;
     }
 
     public void Dispose()
