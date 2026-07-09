@@ -2,6 +2,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Voxel.Shared\Voxel.Shared.csproj" />
+    <!-- Integrated server for offline play (client hosts the world in-process). -->
+    <ProjectReference Include="..\Voxel.Server\Voxel.Server.csproj" />
   </ItemGroup>
 
   <ItemGroup>

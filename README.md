@@ -12,9 +12,18 @@ byte-compatible — browser and native clients can play on the same server.
 ## Run (dev)
 
 ```sh
-dotnet run --project src/Voxel.Server    # ws://0.0.0.0:8081, world in worlds/main.db
-dotnet run --project src/Voxel.Client    # connects to ws://localhost:8081
+dotnet run --project src/Voxel.Client    # offline: hosts worlds/main.db in-process
 ```
+
+Multiplayer keeps the dedicated server:
+
+```sh
+dotnet run --project src/Voxel.Server                            # ws://0.0.0.0:8081, world in worlds/main.db
+dotnet run --project src/Voxel.Client -- --server ws://host:8081 # join it
+```
+
+Offline and the dedicated server share `worlds/main.db`; a `.lock` file
+prevents opening the same world twice (join the running server instead).
 
 Client flags: `--server ws://host:8081`, `--pos x y z`, `--look yaw pitch`,
 `--screenshot out.png --frames N` (automated verification).

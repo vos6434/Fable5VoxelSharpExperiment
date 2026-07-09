@@ -5,6 +5,10 @@ using Voxel.Shared;
 
 namespace Voxel.Server;
 
+/// <summary>Another server process has the world open (see WorldStore's .lock guard).</summary>
+public sealed class WorldLockedException(string worldPath)
+    : IOException($"world \"{worldPath}\" is already in use by another server process");
+
 /// <summary>
 /// SQLite-backed chunk persistence, format-compatible with the web version:
 /// WAL mode, chunks keyed (cx, cy, cz) with raw-deflate-compressed u16 LE
@@ -17,6 +21,8 @@ namespace Voxel.Server;
 public sealed class WorldStore : IDisposable
 {
     private readonly SqliteConnection _db;
+    private readonly FileStream _lock;
+    private readonly string _lockPath;
     private readonly WorldGen _generator;
     private readonly Dictionary<(int, int, int), ChunkData> _cache = new();
     /// <summary>Deflated LOD blobs by (level, cx, cy, cz); null = all air.</summary>
@@ -28,25 +34,47 @@ public sealed class WorldStore : IDisposable
         _generator = generator;
         _waterId = blocks.Resolve("water");
         Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
+
+        // Single-writer guard: SQLite WAL would let two server processes open
+        // the same world and diverge; make that a clean startup error instead.
+        _lockPath = filePath + ".lock";
+        try
+        {
+            _lock = new FileStream(_lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        }
+        catch (IOException)
+        {
+            throw new WorldLockedException(filePath);
+        }
+
         _db = new SqliteConnection($"Data Source={filePath}");
-        _db.Open();
+        try
+        {
+            _db.Open();
 
-        Execute("PRAGMA journal_mode = WAL;");
-        Execute("""
-            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS chunks (
-              cx INTEGER NOT NULL, cy INTEGER NOT NULL, cz INTEGER NOT NULL,
-              blocks BLOB NOT NULL,
-              PRIMARY KEY (cx, cy, cz)
-            ) WITHOUT ROWID;
-            """);
+            Execute("PRAGMA journal_mode = WAL;");
+            Execute("""
+                CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS chunks (
+                  cx INTEGER NOT NULL, cy INTEGER NOT NULL, cz INTEGER NOT NULL,
+                  blocks BLOB NOT NULL,
+                  PRIMARY KEY (cx, cy, cz)
+                ) WITHOUT ROWID;
+                """);
 
-        WorldMigrations.Run(_db);
+            WorldMigrations.Run(_db);
 
-        CheckMeta("generatorVersion", WorldGen.GeneratorVersion.ToString());
-        CheckMeta("seed", generator.Seed.ToString());
-        // Matches JSON.stringify(paletteArray) so worlds are portable across implementations.
-        CheckMeta("palette", JsonSerializer.Serialize(blocks.Defs.Select(d => d.StringId)));
+            CheckMeta("generatorVersion", WorldGen.GeneratorVersion.ToString());
+            CheckMeta("seed", generator.Seed.ToString());
+            // Matches JSON.stringify(paletteArray) so worlds are portable across implementations.
+            CheckMeta("palette", JsonSerializer.Serialize(blocks.Defs.Select(d => d.StringId)));
+        }
+        catch
+        {
+            _db.Dispose();
+            _lock.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Free-form meta read (unlike CheckMeta, no pinning semantics).</summary>
@@ -400,5 +428,10 @@ public sealed class WorldStore : IDisposable
         cmd.ExecuteNonQuery();
     }
 
-    public void Dispose() => _db.Dispose();
+    public void Dispose()
+    {
+        _db.Dispose();
+        _lock.Dispose();
+        try { File.Delete(_lockPath); } catch { /* another process may have grabbed it already */ }
+    }
 }

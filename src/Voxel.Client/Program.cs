@@ -1,16 +1,19 @@
 using System.Globalization;
 using Voxel.Client;
+using Voxel.Server;
 using Voxel.Shared;
 
 // Flags:
-//   --server ws://host:port     game server (default ws://localhost:8081)
+//   --server ws://host:port     join a game server; without it the client
+//                               plays offline, hosting worlds/main.db
+//                               in-process on an ephemeral loopback port
 //   --screenshot <path>         save a PNG after --frames frames, then exit
 //   --frames N                  frames before the screenshot (default 90)
 //   --pos x y z                 start position override (verification teleports)
 //   --look yaw pitch            start look angles (radians)
 string? screenshotPath = null;
 int screenshotFrames = 90;
-Uri server = new($"ws://localhost:{Protocol.Port}");
+Uri? server = null;
 (double, double, double)? startPos = null;
 (float, float)? startLook = null;
 bool demoEdits = false;
@@ -57,11 +60,35 @@ string FindRepoRoot()
     throw new InvalidOperationException("repo root with /data and /shaders not found");
 }
 
+string repoRoot = FindRepoRoot();
+
+// Offline (the default): host the world in-process — same authoritative
+// server, ephemeral loopback port — and connect to ourselves.
+ServerHost? host = null;
+if (server is null)
+{
+    Console.WriteLine("[client] offline mode - hosting the world locally (use --server to join a server)");
+    try
+    {
+        host = ServerHost.StartAsync(repoRoot, Path.Combine(repoRoot, "worlds", "main.db"), "http://127.0.0.1:0")
+            .GetAwaiter().GetResult();
+    }
+    catch (WorldLockedException ex)
+    {
+        Console.Error.WriteLine();
+        Console.Error.WriteLine($"  {ex.Message}.");
+        Console.Error.WriteLine("  A server is probably running on this world - join it instead:");
+        Console.Error.WriteLine($"    dotnet run --project src/Voxel.Client -- --server ws://localhost:{Protocol.Port}");
+        Environment.Exit(1);
+    }
+    server = host!.Uri;
+}
+
 try
 {
     new Game(new GameOptions
     {
-        RepoRoot = FindRepoRoot(),
+        RepoRoot = repoRoot,
         Server = server,
         ScreenshotPath = screenshotPath,
         ScreenshotAfterFrames = screenshotFrames,
@@ -83,8 +110,12 @@ catch (ClientConnectException ex)
     Console.Error.WriteLine($"  Could not connect to the game server at {server}.");
     Console.Error.WriteLine($"  Reason: {ex.Message}");
     Console.Error.WriteLine();
-    Console.Error.WriteLine("  Start the server first, then launch the client:");
-    Console.Error.WriteLine("    dotnet run --project src/Voxel.Server");
-    Console.Error.WriteLine("  Or point the client at another host:  --server ws://host:8081");
+    Console.Error.WriteLine("  Check the address and that the server is running, or run without");
+    Console.Error.WriteLine("  --server to play offline.");
     Environment.Exit(1);
+}
+finally
+{
+    // Flush the offline world to disk after the window closes.
+    host?.DisposeAsync().AsTask().GetAwaiter().GetResult();
 }

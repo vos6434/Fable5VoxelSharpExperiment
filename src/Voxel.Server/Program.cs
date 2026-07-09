@@ -30,26 +30,25 @@ using (var probe = new WorldStore(worldPath, generator, blocks))
 {
     foreach (var (cx, cy, cz) in testCoords) probe.Load(cx, cy, cz);
 }
-var store = new WorldStore(worldPath, generator, blocks);
-bool roundTripOk = testCoords.All(c =>
+using (var probe = new WorldStore(worldPath, generator, blocks))
 {
-    var loaded = store.Load(c.Item1, c.Item2, c.Item3).Blocks;
-    var fresh = generator.Generate(c.Item1, c.Item2, c.Item3).Chunk.Blocks;
-    return loaded.AsSpan().SequenceEqual(fresh);
-});
-Console.WriteLine(
-    $"[server] persistence round-trip {(roundTripOk ? "OK" : "FAILED")} - " +
-    $"world {Path.GetFileName(worldPath)}, seed {generator.Seed}, {store.ChunkCount} chunks on disk");
-if (!roundTripOk) throw new InvalidOperationException("persistence self-test failed");
+    bool roundTripOk = testCoords.All(c =>
+    {
+        var loaded = probe.Load(c.Item1, c.Item2, c.Item3).Blocks;
+        var fresh = generator.Generate(c.Item1, c.Item2, c.Item3).Chunk.Blocks;
+        return loaded.AsSpan().SequenceEqual(fresh);
+    });
+    Console.WriteLine(
+        $"[server] persistence round-trip {(roundTripOk ? "OK" : "FAILED")} - " +
+        $"world {Path.GetFileName(worldPath)}, seed {generator.Seed}, {probe.ChunkCount} chunks on disk");
+    if (!roundTripOk) throw new InvalidOperationException("persistence self-test failed");
+}
 
-// ---- World clock (plan 01: 20 TPS ticks + timescale) ------------------------
-var clock = new WorldClock();
-long savedWorldTime = long.TryParse(store.GetMeta("worldTime"), out long t0) ? t0 : 0;
-
-// ---- WebSocket game server --------------------------------------------------
-var gameServer = new GameServer(store, blocks, generator, clock);
-clock.Start(savedWorldTime);
-Console.WriteLine($"[server] world clock started at tick {savedWorldTime} ({Constants.TicksPerSecond} TPS)");
+// ---- Game server (world, clock, WebSocket endpoint) -------------------------
+await using var host = await ServerHost.StartAsync(repoRoot, worldPath, $"http://0.0.0.0:{Protocol.Port}");
+var gameServer = host.Game;
+var clock = host.Clock;
+var store = host.Store;
 
 // ---- Console commands: tick rate <x> | tick pause | tick resume | tick step [n] | tick status
 _ = Task.Run(() =>
@@ -125,24 +124,6 @@ _ = Task.Run(() =>
     Console.WriteLine("[server] console input closed");
 });
 
-var builder = WebApplication.CreateBuilder(args);
-builder.Logging.SetMinimumLevel(LogLevel.Warning);
-builder.WebHost.UseUrls($"http://0.0.0.0:{Protocol.Port}");
-var app = builder.Build();
-
-app.UseWebSockets();
-app.Map("/", async context =>
-{
-    if (!context.WebSockets.IsWebSocketRequest)
-    {
-        context.Response.StatusCode = StatusCodes.Status400BadRequest;
-        await context.Response.WriteAsync("Fable5Voxel game server: WebSocket connections only.");
-        return;
-    }
-    using var ws = await context.WebSockets.AcceptWebSocketAsync();
-    await gameServer.HandleSocket(ws, context.RequestAborted);
-});
-
 _ = Task.Run(async () =>
 {
     long lastTick = clock.WorldTick;
@@ -158,14 +139,4 @@ _ = Task.Run(async () =>
     }
 });
 
-app.Lifetime.ApplicationStopping.Register(() =>
-{
-    gameServer.PersistAllEntities();
-    clock.Dispose();
-    store.SetMeta("worldTime", clock.WorldTick.ToString());
-    store.Dispose(); // flush WAL cleanly on shutdown
-    Console.WriteLine($"[server] world store closed at tick {clock.WorldTick}");
-});
-
-Console.WriteLine($"[server] game server listening on ws://0.0.0.0:{Protocol.Port}");
-app.Run();
+await host.WaitForShutdownAsync(); // Ctrl-C; the await-using flush runs after
