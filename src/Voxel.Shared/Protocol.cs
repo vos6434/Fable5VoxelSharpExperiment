@@ -14,7 +14,7 @@ public enum Msg : byte
 {
     // client → server
     Hello = 1,        // JSON { name, protocolVersion }
-    ChunkRequest = 2, // u16 count, count x (i32 cx, i32 cy, i32 cz)
+    ChunkRequest = 2, // u16 count, u8 lodLevel, count x (i32 cx, i32 cy, i32 cz)
     Move = 3,         // f64 x,y,z, f32 yaw, f32 pitch
     SetBlock = 4,     // i32 x,y,z, u16 blockId (0 = break)
     TimeControl = 5,  // i64 setTick (-1 = no change), f32 timescale (<0 = no change)

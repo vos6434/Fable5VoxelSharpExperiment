@@ -158,7 +158,20 @@ and throws them. Server-authoritative, multiplayer-correct.
    66 tests.
 6. **Caps & hardening** — 1,000-block cap UX, CCD for throws, contraption-
    vs-contraption stacking stress test (10× 100-block crates).
+
+   **DEFERRED (2026-07-09).** Core hardening landed piecemeal instead: glue
+   selection-box volume cap (server DoS fix), CCD already on all dynamic
+   bodies, buoyancy stability tests. Cap *UX* (client feedback on oversized
+   selections) and the stacking stress test remain if needed later.
 7. **Disassemble** — snap-back-to-blocks flow.
+
+   **DEFERRED (2026-07-09).** Not yet requested in play; revisit after 04.
+
+Post-plan extras that shipped during 03 (2026-07-07..09): WorldEdit-style
+two-corner glue selection (protocol v8), buoyancy (hollow hulls float upright,
+headless stability tests), building on contraptions (grid expansion + anchor
+repositioning), and hull water cut-outs (liquid shader discards world sea
+inside a floating hull's interior heightfield — dry decks in any orientation).
 
 ## Verification
 
