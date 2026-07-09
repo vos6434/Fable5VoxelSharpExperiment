@@ -16,16 +16,18 @@ uniform float uFogFar;
 uniform float uAlphaTest;
 
 // Contraption water cut-outs (plan 03): world water is discarded inside a
-// floating hull's footprint so the boat reads hollow from any camera position
-// (a depth-based occluder fails once the camera is inside it). Each hull's
-// interior-column mask is decomposed into a few grid-local rectangles; a
-// cut-out is one such rect. uCutoutInv maps world -> that hull's grid-local
-// space, uCutoutMin/uCutoutMax bound the rect. Only enabled for liquid passes.
-#define MAX_CUTOUTS 16
-uniform int uCutoutCount;
-uniform mat4 uCutoutInv[MAX_CUTOUTS];
-uniform vec3 uCutoutMin[MAX_CUTOUTS];
-uniform vec3 uCutoutMax[MAX_CUTOUTS];
+// floating hull's enclosed interior so the boat reads hollow from any camera
+// position (a depth-based occluder fails once the camera is inside it). The
+// interior is a heightfield (stepped V-hulls), so it ships as grid-local rects
+// grouped by floor level: each rect carves from its own floor top to the deck
+// rim. One inverse model matrix per hull; rect.w picks the hull. Liquid only.
+#define MAX_CUT_HULLS 4
+#define MAX_CUT_RECTS 24
+uniform int uCutoutHullCount;
+uniform int uCutoutRectCount;
+uniform mat4 uCutoutHullInv[MAX_CUT_HULLS];
+uniform vec4 uCutoutRectMin[MAX_CUT_RECTS]; // xyz = local min, w = hull index
+uniform vec3 uCutoutRectMax[MAX_CUT_RECTS];
 
 // Lighting terms (all colors are pre-scaled intensities).
 uniform vec3 uAmbientFloor;  // always applies (night floor / hell red glow)
@@ -239,10 +241,16 @@ void main() {
     vec4 texel = texture(uAtlas, vec3(vUv, vMeta.x));
     if (texel.a < uAlphaTest) discard;
 
-    // Carve world water out of any floating hull rect it falls inside.
-    for (int i = 0; i < uCutoutCount; i++) {
-        vec3 lp = (uCutoutInv[i] * vec4(vWorldPos, 1.0)).xyz;
-        if (all(greaterThan(lp, uCutoutMin[i])) && all(lessThan(lp, uCutoutMax[i]))) discard;
+    // Carve world water out of any floating hull interior it falls inside.
+    if (uCutoutRectCount > 0) {
+        vec3 lp[MAX_CUT_HULLS];
+        for (int h = 0; h < uCutoutHullCount; h++) {
+            lp[h] = (uCutoutHullInv[h] * vec4(vWorldPos, 1.0)).xyz;
+        }
+        for (int r = 0; r < uCutoutRectCount; r++) {
+            vec3 p = lp[int(uCutoutRectMin[r].w)];
+            if (all(greaterThan(p, uCutoutRectMin[r].xyz)) && all(lessThan(p, uCutoutRectMax[r]))) discard;
+        }
     }
 
     // Emissive faces (glowstone, lava): fullbright, no lighting or shadows.

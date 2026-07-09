@@ -39,11 +39,13 @@ public class EntityWaterMaskTests
     {
         var result = EntityRenderer.ComputeInteriorColumns(FlooredBoat(), 7, 4, 7);
         Assert.NotNull(result);
-        var (mask, deckY) = result.Value;
+        var (mask, deckY, floorAir) = result.Value;
 
         Assert.True(mask[3 * 7 + 3], "cockpit centre (floor below, water above) must be masked");
         Assert.True(mask[1 * 7 + 1], "hull wall column must be masked");
-        Assert.Equal(3, deckY); // one above the top wall course (y=2)
+        Assert.Equal(3, deckY);          // one above the top wall course (y=2)
+        Assert.Equal(1, floorAir[3 * 7 + 3]); // cockpit air starts above the floor block (y=0)
+        Assert.Equal(3, floorAir[1 * 7 + 1]); // wall column is solid to the rim (carves nothing)
     }
 
     [Fact]
@@ -51,7 +53,7 @@ public class EntityWaterMaskTests
     {
         var result = EntityRenderer.ComputeInteriorColumns(FlooredBoat(), 7, 4, 7);
         Assert.NotNull(result);
-        var (mask, _) = result.Value;
+        var (mask, _, _) = result.Value;
 
         Assert.False(mask[0 * 7 + 0], "corner outside the hull is open sea");
         Assert.False(mask[3 * 7 + 0], "cell beside the hull is open sea");
@@ -74,7 +76,7 @@ public class EntityWaterMaskTests
 
         var result = EntityRenderer.ComputeInteriorColumns(blocks, dx, dy, dz);
         Assert.NotNull(result);
-        var (mask, _) = result.Value;
+        var (mask, _, _) = result.Value;
         Assert.True(mask[4 * dx + 4], "hull interior masked");
         Assert.True(mask[1 * dx + 4], "the concave notch pocket masked, not left as water");
     }
@@ -96,10 +98,10 @@ public class EntityWaterMaskTests
         for (int z = 2; z < 4; z++)
         for (int x = 2; x < 4; x++) mask[z * dx + x] = true;
 
-        var rects = EntityRenderer.DecomposeRects(mask, dx, dz);
+        var rects = EntityRenderer.DecomposeRects(mask, new int[dx * dz], deckY: 1, dx, dz);
 
         var covered = new bool[dx * dz];
-        foreach (var (x0, z0, w, d) in rects)
+        foreach (var (x0, z0, w, d, _) in rects)
             for (int z = z0; z < z0 + d; z++)
             for (int x = x0; x < x0 + w; x++)
             {
@@ -107,6 +109,22 @@ public class EntityWaterMaskTests
                 covered[z * dx + x] = true;
             }
         Assert.Equal(mask, covered);
+    }
+
+    [Fact]
+    public void Stepped_hull_carves_each_floor_level_from_its_own_height()
+    {
+        // A stepped V-hull cross-section: keel row at floorAir 1, a step at 2, walls at deck.
+        const int dx = 5, dz = 1, deckY = 4;
+        bool[] mask = [true, true, true, true, true];
+        int[] floorAir = [4, 2, 1, 2, 4]; // walls | step | keel | step | walls
+
+        var rects = EntityRenderer.DecomposeRects(mask, floorAir, deckY, dx, dz);
+
+        Assert.Equal(3, rects.Count); // keel rect + two step rects; wall columns carve nothing
+        Assert.Contains((2, 0, 1, 1, 1), rects);  // keel: carve from y=1
+        Assert.Contains((1, 0, 1, 1, 2), rects);  // left step: carve from y=2
+        Assert.Contains((3, 0, 1, 1, 2), rects);  // right step: carve from y=2
     }
 
     [Fact]

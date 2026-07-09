@@ -23,8 +23,8 @@ public sealed class EntityRenderer : IDisposable
         public required float PivotX, PivotY, PivotZ;
         public required ushort[] Blocks;
         public required ChunkMesh Mesh;
-        /// <summary>Hull-interior footprint as grid-local rects (water cut-outs); null when nothing encloses.</summary>
-        public List<(int X0, int Z0, int W, int D)>? HullRects;
+        /// <summary>Hull-interior heightfield as grid-local rects per floor level (water cut-outs).</summary>
+        public List<(int X0, int Z0, int W, int D, int MinY)>? HullRects;
         /// <summary>Top of the water cut-out (one above the hull rim).</summary>
         public int DeckY;
         public float X, Y, Z;
@@ -89,7 +89,7 @@ public sealed class EntityRenderer : IDisposable
             PivotX = s.PivotX, PivotY = s.PivotY, PivotZ = s.PivotZ,
             Blocks = s.Blocks,
             Mesh = new ChunkMesh(_gl, pass),
-            HullRects = hull is { } h ? DecomposeRects(h.Interior, s.DimX, s.DimZ) : null,
+            HullRects = hull is { } h ? DecomposeRects(h.Interior, h.FloorAir, h.DeckY, s.DimX, s.DimZ) : null,
             DeckY = hull?.DeckY ?? 0,
             X = (float)s.X, Y = (float)s.Y, Z = (float)s.Z,
             Qx = s.Qx, Qy = s.Qy, Qz = s.Qz, Qw = s.Qw,
@@ -172,47 +172,47 @@ public sealed class EntityRenderer : IDisposable
         }
     }
 
-    /// <summary>One water cut-out box: world→grid-local transform + local rect bounds.</summary>
-    public readonly record struct WaterCutout(
-        float[] Inv, float MinX, float MinY, float MinZ, float MaxX, float MaxY, float MaxZ);
+    /// <summary>One hull's water cut-out: world→grid-local transform + interior rects (per floor level).</summary>
+    public readonly record struct CutoutHull(
+        float[] Inv, List<(float MinX, float MinY, float MinZ, float MaxX, float MaxY, float MaxZ)> Rects);
 
     /// <summary>
-    /// Hull-interior rects of the nearest floating hulls, as cut-out boxes for the liquid
-    /// shader (world sea is discarded inside them so a boat reads hollow from any camera).
-    /// Nearest hulls claim the budget first. The box starts exactly at the hull bottom (no
-    /// padding below), and only near-level hulls carve at all: a boat tilted by the physics
-    /// gun sweeps its box through the surface at a shallow angle, honestly removing a long
-    /// swath of sea over the dipped end — which reads as a seabed-deep hole "under" the
-    /// boat. A settled floating boat is upright (buoyancy rights it), so it always carves.
+    /// The nearest floating hulls as cut-outs for the liquid shader: world sea is discarded
+    /// inside each hull's *enclosed interior* — per column from its floor top to the deck rim —
+    /// so every carved fragment lies inside the hull and the walls/floor always occlude the
+    /// carve from outside. That makes any orientation safe: a boat held tilted by the physics
+    /// gun stays dry inside without tearing a visible hole in the open sea.
     /// </summary>
-    public List<WaterCutout> WaterCutouts(float camX, float camY, float camZ, int maxBoxes)
+    public List<CutoutHull> WaterCutoutHulls(float camX, float camY, float camZ, int maxHulls, int maxRects)
     {
         var hulls = new List<(float Dist, Entity E)>();
         foreach (var e in _entities.Values)
         {
-            if (e.HullRects is null || e.HullRects.Count == 0 || e.DeckY <= 0) continue;
-            // Y component of the grid's rotated up axis; < ~18° of tilt required.
-            float upY = 1f - 2f * (e.Qx * e.Qx + e.Qz * e.Qz);
-            if (upY < 0.95f) continue;
+            if (e.HullRects is null || e.HullRects.Count == 0) continue;
             float dx = e.X - camX, dy = e.Y - camY, dz = e.Z - camZ;
             hulls.Add((dx * dx + dy * dy + dz * dz, e));
         }
         hulls.Sort((a, b) => a.Dist.CompareTo(b.Dist));
 
-        var result = new List<WaterCutout>();
+        var result = new List<CutoutHull>();
+        int rectBudget = maxRects;
         foreach (var (_, e) in hulls)
         {
-            if (result.Count >= maxBoxes) break;
+            if (result.Count >= maxHulls || rectBudget <= 0) break;
             // Inverse of T(pos)·R(q)·T(-pivot): T(pivot)·R(conj q)·T(-pos).
             var inv = Mat4.Multiply(
                 Mat4.Multiply(Mat4.Translation(e.PivotX, e.PivotY, e.PivotZ),
                               Mat4.FromQuaternion(-e.Qx, -e.Qy, -e.Qz, e.Qw)),
                 Mat4.Translation(-e.X, -e.Y, -e.Z));
-            foreach (var (x0, z0, w, d) in e.HullRects!)
+            var rects = new List<(float, float, float, float, float, float)>();
+            foreach (var (x0, z0, w, d, minY) in e.HullRects!)
             {
-                if (result.Count >= maxBoxes) break;
-                result.Add(new WaterCutout(inv, x0, 0f, z0, x0 + w, e.DeckY, z0 + d));
+                if (rects.Count >= rectBudget) break;
+                rects.Add((x0, minY, z0, x0 + w, e.DeckY, z0 + d));
             }
+            if (rects.Count == 0) continue;
+            rectBudget -= rects.Count;
+            result.Add(new CutoutHull(inv, rects));
         }
         return result;
     }
@@ -275,29 +275,35 @@ public sealed class EntityRenderer : IDisposable
     }
 
     /// <summary>
-    /// Greedy rectangle cover of the interior-column mask: each rect extends its first
-    /// unclaimed cell right along X, then forward along Z while the full row matches.
-    /// Boat hulls are near-convex, so this yields a handful of rects.
+    /// Greedy rectangle cover of the interior heightfield: cells merge into a rect only when
+    /// they share the same floor level, and columns whose floor reaches the deck (full-height
+    /// walls, the mast) carve nothing. Each rect carves local y in (MinY, deckY). Boat hulls
+    /// are near-convex with a few floor steps, so this yields a handful of rects.
     /// </summary>
-    public static List<(int X0, int Z0, int W, int D)> DecomposeRects(bool[] mask, int dimX, int dimZ)
+    public static List<(int X0, int Z0, int W, int D, int MinY)> DecomposeRects(
+        bool[] mask, int[] floorAir, int deckY, int dimX, int dimZ)
     {
         var claimed = new bool[dimX * dimZ];
-        var rects = new List<(int, int, int, int)>();
-        bool Free(int x, int z) => mask[z * dimX + x] && !claimed[z * dimX + x];
+        var rects = new List<(int, int, int, int, int)>();
+        bool Free(int x, int z, int level) =>
+            mask[z * dimX + x] && !claimed[z * dimX + x] && floorAir[z * dimX + x] == level;
 
         for (int z = 0; z < dimZ; z++)
         for (int x = 0; x < dimX; x++)
         {
-            if (!Free(x, z)) continue;
+            int c = z * dimX + x;
+            if (!mask[c] || claimed[c]) continue;
+            int level = floorAir[c];
+            if (level >= deckY) { claimed[c] = true; continue; } // wall/mast column: nothing above to carve
             int w = 1;
-            while (x + w < dimX && Free(x + w, z)) w++;
+            while (x + w < dimX && Free(x + w, z, level)) w++;
             int d = 1;
-            bool RowFree(int zz) { for (int i = 0; i < w; i++) if (!Free(x + i, zz)) return false; return true; }
+            bool RowFree(int zz) { for (int i = 0; i < w; i++) if (!Free(x + i, zz, level)) return false; return true; }
             while (z + d < dimZ && RowFree(z + d)) d++;
             for (int j = 0; j < d; j++)
             for (int i = 0; i < w; i++)
                 claimed[(z + j) * dimX + (x + i)] = true;
-            rects.Add((x, z, w, d));
+            rects.Add((x, z, w, d, level));
         }
         return rects;
     }
@@ -311,10 +317,13 @@ public sealed class EntityRenderer : IDisposable
     /// gaps and concave notches, and the open sea is flood-filled inward from the (padded) border.
     /// Every column the sea can't reach — hull walls, the floor, and the enclosed cockpit alike —
     /// is masked, because a boat with a floor has world water sitting in the cockpit *above* that
-    /// floor and every interior column then holds a block. The plug rises to the tallest block so
-    /// it always clears the interior waterline. Null when nothing is enclosed (open water only).
+    /// floor and every interior column then holds a block. FloorAir gives, per masked column, the
+    /// local Y where the interior air starts (one above that column's top block — hull floors are
+    /// heightfields, e.g. stepped V-hulls); DeckY (one above the hull rim) caps the volume. Null
+    /// when nothing is enclosed (open water only).
     /// </summary>
-    public static (bool[] Interior, int DeckY)? ComputeInteriorColumns(ushort[] blocks, int dimX, int dimY, int dimZ)
+    public static (bool[] Interior, int DeckY, int[] FloorAir)? ComputeInteriorColumns(
+        ushort[] blocks, int dimX, int dimY, int dimZ)
     {
         int n = dimX * dimZ;
         var wall = new bool[n];
@@ -365,26 +374,31 @@ public sealed class EntityRenderer : IDisposable
         // touching the sea): the plug tops out at the gunwale, and a tall mast or a sail plane
         // whose end grazes the rim is outvoted instead of pushing the mask above the hull.
         var interior = new bool[n];
+        var floorAir = new int[n];
         bool any = false;
         var rimTops = new Dictionary<int, int>();
         for (int z = 0; z < dimZ; z++)
         for (int x = 0; x < dimX; x++)
         {
             if (sea[(z + m) * px + (x + m)]) continue;
-            interior[z * dimX + x] = true;
+            int c = z * dimX + x;
+            interior[c] = true;
+            floorAir[c] = top[c] + 1; // empty enclosed columns (top -1) carve from the grid bottom
             any = true;
 
             bool onRim = sea[(z + m) * px + (x + m - 1)] || sea[(z + m) * px + (x + m + 1)]
                       || sea[(z + m - 1) * px + (x + m)] || sea[(z + m + 1) * px + (x + m)];
-            if (onRim) rimTops[top[z * dimX + x]] = rimTops.GetValueOrDefault(top[z * dimX + x]) + 1;
+            if (onRim) rimTops[top[c]] = rimTops.GetValueOrDefault(top[c]) + 1;
         }
         if (!any) return null;
 
+        // Deck = one above the most common rim height (a mast or sail end grazing the rim is
+        // outvoted instead of pushing the carve above the hull).
         int deckTop = maxTop, bestCount = 0;
         foreach (var (t, count) in rimTops)
             if (count > bestCount || (count == bestCount && t > deckTop)) { deckTop = t; bestCount = count; }
 
-        return (interior, deckTop + 1);
+        return (interior, deckTop + 1, floorAir);
     }
 
     /// <summary>Morphological close (dilate then erode) by a Chebyshev radius, sealing gaps up to ~2R wide.</summary>

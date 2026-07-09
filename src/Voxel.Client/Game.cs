@@ -390,21 +390,28 @@ public sealed class Game
     }
 
     /// <summary>
-    /// Uploads the nearest floating hulls' interior rects as water cut-out boxes for the
-    /// liquid passes (the shader discards world sea inside them). Returns how many were set.
+    /// Uploads the nearest floating hulls' interior heightfields as water cut-out rects for
+    /// the liquid passes (the shader discards world sea inside them). Returns the rect count.
     /// </summary>
     private int SetWaterCutouts()
     {
-        const int maxCutouts = 16; // matches MAX_CUTOUTS in chunk.frag
-        var cuts = _entities.WaterCutouts(_camera.X, _camera.Y, _camera.Z, maxCutouts);
-        _shader.SetInt("uCutoutCount", cuts.Count);
-        for (int i = 0; i < cuts.Count; i++)
+        const int maxHulls = 4;  // matches MAX_CUT_HULLS in chunk.frag
+        const int maxRects = 24; // matches MAX_CUT_RECTS in chunk.frag
+        var hulls = _entities.WaterCutoutHulls(_camera.X, _camera.Y, _camera.Z, maxHulls, maxRects);
+        int rect = 0;
+        for (int h = 0; h < hulls.Count; h++)
         {
-            _shader.SetMatrix($"uCutoutInv[{i}]", cuts[i].Inv);
-            _shader.SetVec3($"uCutoutMin[{i}]", cuts[i].MinX, cuts[i].MinY, cuts[i].MinZ);
-            _shader.SetVec3($"uCutoutMax[{i}]", cuts[i].MaxX, cuts[i].MaxY, cuts[i].MaxZ);
+            _shader.SetMatrix($"uCutoutHullInv[{h}]", hulls[h].Inv);
+            foreach (var (minX, minY, minZ, maxX, maxY, maxZ) in hulls[h].Rects)
+            {
+                _shader.SetFloat4($"uCutoutRectMin[{rect}]", minX, minY, minZ, h);
+                _shader.SetVec3($"uCutoutRectMax[{rect}]", maxX, maxY, maxZ);
+                rect++;
+            }
         }
-        return cuts.Count;
+        _shader.SetInt("uCutoutHullCount", hulls.Count);
+        _shader.SetInt("uCutoutRectCount", rect);
+        return rect;
     }
 
     private void DrawGlueCornerMarker((int X, int Y, int Z) c, float r, float g, float b)
@@ -810,7 +817,7 @@ public sealed class Game
         }
         _gl.DepthMask(true);
         _gl.Disable(EnableCap.Blend);
-        if (cutouts > 0) _shader.SetInt("uCutoutCount", 0); // cut-outs apply to liquids only
+        if (cutouts > 0) _shader.SetInt("uCutoutRectCount", 0); // cut-outs apply to liquids only
 
         // Flat-color pass: remote players, then the block target outline.
         _colorShader.Use();
