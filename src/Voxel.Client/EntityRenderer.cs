@@ -23,8 +23,10 @@ public sealed class EntityRenderer : IDisposable
         public required float PivotX, PivotY, PivotZ;
         public required ushort[] Blocks;
         public required ChunkMesh Mesh;
-        /// <summary>Depth-only "lid" over enclosed hull columns; hides world water seen through an open deck.</summary>
-        public ChunkMesh? WaterMask;
+        /// <summary>Hull-interior footprint as grid-local rects (water cut-outs); null when nothing encloses.</summary>
+        public List<(int X0, int Z0, int W, int D)>? HullRects;
+        /// <summary>Top of the water cut-out (one above the hull rim).</summary>
+        public int DeckY;
         public float X, Y, Z;
         public float Qx, Qy, Qz, Qw = 1;
         public float Tx, Ty, Tz;
@@ -68,18 +70,18 @@ public sealed class EntityRenderer : IDisposable
                 }
                 break;
             case ServerEvent.EntityDespawned d:
-                if (_entities.Remove(d.Id, out var gone)) { gone.Mesh.Dispose(); gone.WaterMask?.Dispose(); }
+                if (_entities.Remove(d.Id, out var gone)) gone.Mesh.Dispose();
                 break;
         }
     }
 
     private void Upsert(ServerEvent.EntitySpawned s)
     {
-        if (_entities.Remove(s.Id, out var existing)) { existing.Mesh.Dispose(); existing.WaterMask?.Dispose(); }
+        if (_entities.Remove(s.Id, out var existing)) existing.Mesh.Dispose();
 
         var pass = BuildMesh(s.Blocks, s.DimX, s.DimY, s.DimZ);
         if (pass is null) return;
-        var maskPass = BuildWaterMask(s.Blocks, s.DimX, s.DimY, s.DimZ);
+        var hull = ComputeInteriorColumns(s.Blocks, s.DimX, s.DimY, s.DimZ);
         _entities[s.Id] = new Entity
         {
             Id = s.Id,
@@ -87,7 +89,8 @@ public sealed class EntityRenderer : IDisposable
             PivotX = s.PivotX, PivotY = s.PivotY, PivotZ = s.PivotZ,
             Blocks = s.Blocks,
             Mesh = new ChunkMesh(_gl, pass),
-            WaterMask = maskPass is null ? null : new ChunkMesh(_gl, maskPass),
+            HullRects = hull is { } h ? DecomposeRects(h.Interior, s.DimX, s.DimZ) : null,
+            DeckY = hull?.DeckY ?? 0,
             X = (float)s.X, Y = (float)s.Y, Z = (float)s.Z,
             Qx = s.Qx, Qy = s.Qy, Qz = s.Qz, Qw = s.Qw,
             Tx = (float)s.X, Ty = (float)s.Y, Tz = (float)s.Z,
@@ -169,19 +172,43 @@ public sealed class EntityRenderer : IDisposable
         }
     }
 
+    /// <summary>One water cut-out box: world→grid-local transform + local rect bounds.</summary>
+    public readonly record struct WaterCutout(
+        float[] Inv, float MinX, float MinY, float MinZ, float MaxX, float MaxY, float MaxZ);
+
     /// <summary>
-    /// Draws the enclosed-hull lids. The caller masks color writes so only depth lands,
-    /// occluding the world-water surface that would otherwise show through an open deck.
+    /// Hull-interior rects of the nearest floating hulls, as cut-out boxes for the liquid
+    /// shader (world sea is discarded inside them so a boat reads hollow from any camera).
+    /// Nearest hulls claim the budget first; MinY reaches one below the grid so the sea
+    /// surface lapping a shallow draft is carved too.
     /// </summary>
-    public void RenderWaterMask(GlShader shader)
+    public List<WaterCutout> WaterCutouts(float camX, float camY, float camZ, int maxBoxes)
     {
-        shader.SetVec3("uChunkOrigin", 0, 0, 0);
+        var hulls = new List<(float Dist, Entity E)>();
         foreach (var e in _entities.Values)
         {
-            if (e.WaterMask is null) continue;
-            shader.SetMatrix("uModel", ModelMatrix(e));
-            e.WaterMask.Draw();
+            if (e.HullRects is null || e.HullRects.Count == 0 || e.DeckY <= 0) continue;
+            float dx = e.X - camX, dy = e.Y - camY, dz = e.Z - camZ;
+            hulls.Add((dx * dx + dy * dy + dz * dz, e));
         }
+        hulls.Sort((a, b) => a.Dist.CompareTo(b.Dist));
+
+        var result = new List<WaterCutout>();
+        foreach (var (_, e) in hulls)
+        {
+            if (result.Count >= maxBoxes) break;
+            // Inverse of T(pos)·R(q)·T(-pivot): T(pivot)·R(conj q)·T(-pos).
+            var inv = Mat4.Multiply(
+                Mat4.Multiply(Mat4.Translation(e.PivotX, e.PivotY, e.PivotZ),
+                              Mat4.FromQuaternion(-e.Qx, -e.Qy, -e.Qz, e.Qw)),
+                Mat4.Translation(-e.X, -e.Y, -e.Z));
+            foreach (var (x0, z0, w, d) in e.HullRects!)
+            {
+                if (result.Count >= maxBoxes) break;
+                result.Add(new WaterCutout(inv, x0, -1f, z0, x0 + w, e.DeckY, z0 + d));
+            }
+        }
+        return result;
     }
 
     private static float[] ModelMatrix(Entity e) =>
@@ -242,45 +269,31 @@ public sealed class EntityRenderer : IDisposable
     }
 
     /// <summary>
-    /// Depth-only plug filling each enclosed hull column from the grid bottom up to deck height.
-    /// A solid volume (not a single plane) so the world water below is occluded from any viewing
-    /// angle, not just straight overhead. Only the outward faces of the interior region are
-    /// emitted (a face is skipped where the neighbouring column is also interior), keeping the
-    /// mesh to the hull's inner shell.
+    /// Greedy rectangle cover of the interior-column mask: each rect extends its first
+    /// unclaimed cell right along X, then forward along Z while the full row matches.
+    /// Boat hulls are near-convex, so this yields a handful of rects.
     /// </summary>
-    private static MeshPass? BuildWaterMask(ushort[] blocks, int dimX, int dimY, int dimZ)
+    public static List<(int X0, int Z0, int W, int D)> DecomposeRects(bool[] mask, int dimX, int dimZ)
     {
-        if (ComputeInteriorColumns(blocks, dimX, dimY, dimZ) is not var (interior, deckY)) return null;
-
-        var verts = new List<float>();
-        var indices = new List<uint>();
-        bool Inside(int x, int z) => x >= 0 && z >= 0 && x < dimX && z < dimZ && interior[z * dimX + x];
-
-        // Face corner layouts for a [x..x+1] x [0..deckY] x [z..z+1] box (pos only; color masked).
-        void Quad(float ax, float ay, float az, float bx, float by, float bz,
-                  float cx, float cy, float cz, float dxp, float dyp, float dzp)
-        {
-            uint b = (uint)(verts.Count / 7);
-            verts.AddRange([ax, ay, az, 0f, 0f, 0f, 1f]);
-            verts.AddRange([bx, by, bz, 0f, 0f, 0f, 1f]);
-            verts.AddRange([cx, cy, cz, 0f, 0f, 0f, 1f]);
-            verts.AddRange([dxp, dyp, dzp, 0f, 0f, 0f, 1f]);
-            indices.AddRange([b, b + 1, b + 2, b, b + 2, b + 3]);
-        }
+        var claimed = new bool[dimX * dimZ];
+        var rects = new List<(int, int, int, int)>();
+        bool Free(int x, int z) => mask[z * dimX + x] && !claimed[z * dimX + x];
 
         for (int z = 0; z < dimZ; z++)
         for (int x = 0; x < dimX; x++)
         {
-            if (!interior[z * dimX + x]) continue;
-            float x0 = x, x1 = x + 1, z0 = z, z1 = z + 1, y0 = 0, y1 = deckY;
-            Quad(x0, y1, z0, x1, y1, z0, x1, y1, z1, x0, y1, z1);          // top (always)
-            if (!Inside(x - 1, z)) Quad(x0, y0, z1, x0, y1, z1, x0, y1, z0, x0, y0, z0); // -X
-            if (!Inside(x + 1, z)) Quad(x1, y0, z0, x1, y1, z0, x1, y1, z1, x1, y0, z1); // +X
-            if (!Inside(x, z - 1)) Quad(x0, y0, z0, x0, y1, z0, x1, y1, z0, x1, y0, z0); // -Z
-            if (!Inside(x, z + 1)) Quad(x1, y0, z1, x1, y1, z1, x0, y1, z1, x0, y0, z1); // +Z
+            if (!Free(x, z)) continue;
+            int w = 1;
+            while (x + w < dimX && Free(x + w, z)) w++;
+            int d = 1;
+            bool RowFree(int zz) { for (int i = 0; i < w; i++) if (!Free(x + i, zz)) return false; return true; }
+            while (z + d < dimZ && RowFree(z + d)) d++;
+            for (int j = 0; j < d; j++)
+            for (int i = 0; i < w; i++)
+                claimed[(z + j) * dimX + (x + i)] = true;
+            rects.Add((x, z, w, d));
         }
-        if (indices.Count == 0) return null;
-        return new MeshPass { Vertices = [.. verts], Indices = [.. indices] };
+        return rects;
     }
 
     /// <summary>Chebyshev radius for the morphological close — seals hull gaps/notches up to ~2R wide.</summary>
@@ -409,7 +422,7 @@ public sealed class EntityRenderer : IDisposable
 
     public void Dispose()
     {
-        foreach (var e in _entities.Values) { e.Mesh.Dispose(); e.WaterMask?.Dispose(); }
+        foreach (var e in _entities.Values) e.Mesh.Dispose();
         _entities.Clear();
     }
 }

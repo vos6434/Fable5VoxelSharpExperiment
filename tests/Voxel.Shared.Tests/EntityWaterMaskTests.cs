@@ -86,6 +86,30 @@ public class EntityWaterMaskTests
     }
 
     [Fact]
+    public void Rect_decomposition_covers_the_mask_exactly()
+    {
+        // L-shaped mask: 4x2 block plus a 2x2 tail — greedy cover, no overlap, full coverage.
+        const int dx = 6, dz = 4;
+        var mask = new bool[dx * dz];
+        for (int z = 0; z < 2; z++)
+        for (int x = 0; x < 4; x++) mask[z * dx + x] = true;
+        for (int z = 2; z < 4; z++)
+        for (int x = 2; x < 4; x++) mask[z * dx + x] = true;
+
+        var rects = EntityRenderer.DecomposeRects(mask, dx, dz);
+
+        var covered = new bool[dx * dz];
+        foreach (var (x0, z0, w, d) in rects)
+            for (int z = z0; z < z0 + d; z++)
+            for (int x = x0; x < x0 + w; x++)
+            {
+                Assert.False(covered[z * dx + x], $"cell ({x},{z}) covered twice");
+                covered[z * dx + x] = true;
+            }
+        Assert.Equal(mask, covered);
+    }
+
+    [Fact]
     public void Deck_tracks_the_hull_rim_not_the_mast()
     {
         // Floor + 2-high walls + a tall central mast: the plug tops out at the gunwale (y=2),

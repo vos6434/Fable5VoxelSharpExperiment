@@ -15,6 +15,18 @@ uniform float uFogNear;
 uniform float uFogFar;
 uniform float uAlphaTest;
 
+// Contraption water cut-outs (plan 03): world water is discarded inside a
+// floating hull's footprint so the boat reads hollow from any camera position
+// (a depth-based occluder fails once the camera is inside it). Each hull's
+// interior-column mask is decomposed into a few grid-local rectangles; a
+// cut-out is one such rect. uCutoutInv maps world -> that hull's grid-local
+// space, uCutoutMin/uCutoutMax bound the rect. Only enabled for liquid passes.
+#define MAX_CUTOUTS 16
+uniform int uCutoutCount;
+uniform mat4 uCutoutInv[MAX_CUTOUTS];
+uniform vec3 uCutoutMin[MAX_CUTOUTS];
+uniform vec3 uCutoutMax[MAX_CUTOUTS];
+
 // Lighting terms (all colors are pre-scaled intensities).
 uniform vec3 uAmbientFloor;  // always applies (night floor / hell red glow)
 uniform vec3 uAmbientSky;    // skylight: multiplied by the vertical openness ray
@@ -226,6 +238,12 @@ vec3 blockLight(vec3 worldPos, vec3 normal) {
 void main() {
     vec4 texel = texture(uAtlas, vec3(vUv, vMeta.x));
     if (texel.a < uAlphaTest) discard;
+
+    // Carve world water out of any floating hull rect it falls inside.
+    for (int i = 0; i < uCutoutCount; i++) {
+        vec3 lp = (uCutoutInv[i] * vec4(vWorldPos, 1.0)).xyz;
+        if (all(greaterThan(lp, uCutoutMin[i])) && all(lessThan(lp, uCutoutMax[i]))) discard;
+    }
 
     // Emissive faces (glowstone, lava): fullbright, no lighting or shadows.
     // Skip distance fog — mixing toward uFogColor (dark red in hell) made

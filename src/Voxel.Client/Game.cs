@@ -389,6 +389,24 @@ public sealed class Game
         _cubeTriangles.Draw();
     }
 
+    /// <summary>
+    /// Uploads the nearest floating hulls' interior rects as water cut-out boxes for the
+    /// liquid passes (the shader discards world sea inside them). Returns how many were set.
+    /// </summary>
+    private int SetWaterCutouts()
+    {
+        const int maxCutouts = 16; // matches MAX_CUTOUTS in chunk.frag
+        var cuts = _entities.WaterCutouts(_camera.X, _camera.Y, _camera.Z, maxCutouts);
+        _shader.SetInt("uCutoutCount", cuts.Count);
+        for (int i = 0; i < cuts.Count; i++)
+        {
+            _shader.SetMatrix($"uCutoutInv[{i}]", cuts[i].Inv);
+            _shader.SetVec3($"uCutoutMin[{i}]", cuts[i].MinX, cuts[i].MinY, cuts[i].MinZ);
+            _shader.SetVec3($"uCutoutMax[{i}]", cuts[i].MaxX, cuts[i].MaxY, cuts[i].MaxZ);
+        }
+        return cuts.Count;
+    }
+
     private void DrawGlueCornerMarker((int X, int Y, int Z) c, float r, float g, float b)
     {
         const float pad = 0.006f;
@@ -756,17 +774,12 @@ public sealed class Game
         draws += _entities.Count;
         _entities.Render(_shader);
 
-        // Water mask: stamp each contraption's enclosed-hull plug into depth only (no color),
-        // so the world-water surface below is occluded and doesn't show through an open deck.
-        // uAlphaTest must be disabled — otherwise the untextured plug (atlas layer 0) is
-        // alpha-tested away and writes no depth at all, defeating the whole pass.
-        _shader.SetFloat("uAlphaTest", -1f);
-        _gl.ColorMask(false, false, false, false);
-        _gl.Disable(EnableCap.CullFace);
-        _gl.DepthMask(true);
-        _entities.RenderWaterMask(_shader);
-        _gl.ColorMask(true, true, true, true);
         _shader.SetMatrix("uModel", IdentityMat); // restore for the chunk liquid/translucent passes
+
+        // Water cut-outs: the liquid passes discard world sea inside each nearby floating
+        // hull, so a boat reads hollow from any camera position — a depth-based occluder
+        // breaks down as soon as the camera is inside it (black sky, water re-appearing).
+        int cutouts = SetWaterCutouts();
 
         // Liquid surfaces (water/lava tops): alpha blend with depth writes.
         // Depth-write keeps each pixel a single blend; adjacent chunks' quads
@@ -797,6 +810,7 @@ public sealed class Game
         }
         _gl.DepthMask(true);
         _gl.Disable(EnableCap.Blend);
+        if (cutouts > 0) _shader.SetInt("uCutoutCount", 0); // cut-outs apply to liquids only
 
         // Flat-color pass: remote players, then the block target outline.
         _colorShader.Use();
