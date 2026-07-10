@@ -41,6 +41,10 @@ uniform vec3 uDirDir;        // toward the directional light
 uniform sampler3D uOccupancy;
 uniform vec3 uOccupancyOrigin; // world min-corner of the volume
 uniform float uOccupancySize;  // edge length in voxels
+// World y just above the volume's highest solid voxel: rays that rise past it
+// cannot hit anything, so marches exit early — over open terrain this cuts
+// ~90-step marches to a handful (full-screen water + seabed was 69 ms).
+uniform float uOccupancyTopY;
 
 // Clustered block lights (plan 02 M4/M5): 8^3-block clusters over the same
 // region as the occupancy volume. Depth slice cz*9+s = light slot s of the
@@ -85,12 +89,14 @@ float dirShadow(vec3 startWorld, vec3 normal) {
     vec3 tDelta = 1.0 / max(abs(dir), vec3(1e-5));
 
     int size = int(uOccupancySize);
+    int topSlice = int(uOccupancyTopY - uOccupancyOrigin.y);
     ivec3 wrapBase = ivec3(mod(uOccupancyOrigin, uOccupancySize) + 0.5);
     for (int i = 0; i < 96; i++) {
         if (voxel.x < 0 || voxel.y < 0 || voxel.z < 0 ||
             voxel.x >= size || voxel.y >= size || voxel.z >= size) {
             return 1.0; // left the volume without hitting anything -> lit
         }
+        if (stp.y > 0 && voxel.y >= topSlice) return 1.0; // rising above all solids -> lit
         if (blocksBlockLight(voxel, size, wrapBase)) return 0.0;
         if (tMax.x < tMax.y && tMax.x < tMax.z) {
             voxel.x += stp.x; tMax.x += tDelta.x;
@@ -123,8 +129,9 @@ float skyVisibility(vec3 startWorld, vec3 normal) {
     // Deep caves still read solid above; open water/air columns read open.
     if (voxel.y < 0) voxel.y = 0;
     ivec3 wrapBase = ivec3(mod(uOccupancyOrigin, uOccupancySize) + 0.5);
+    int topSlice = int(uOccupancyTopY - uOccupancyOrigin.y);
     for (int i = 0; i < 96; i++) {
-        if (voxel.y >= size) return 1.0;
+        if (voxel.y >= size || voxel.y >= topSlice) return 1.0; // above all solids -> open sky
         if (solidAt(voxel, size, wrapBase)) return 0.0;
         voxel.y += 1;
     }

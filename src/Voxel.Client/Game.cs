@@ -749,6 +749,10 @@ public sealed class Game
         var (ox, oy, oz) = _occupancy.OriginWorld;
         _shader.SetVec3("uOccupancyOrigin", ox, oy, oz);
         _shader.SetFloat("uOccupancySize", _occupancy.Size);
+        // Just above the highest solid in the volume; rays exit above it. An
+        // empty volume clamps to the origin so every march exits immediately.
+        _shader.SetFloat("uOccupancyTopY",
+            _occupancy.ContentTopWorldY == int.MinValue ? oy : _occupancy.ContentTopWorldY + 1);
         _shader.SetInt("uLights", 2);
         _lights.Bind(TextureUnit.Texture2);
         var (lx, ly, lz) = _lights.BuiltOriginWorld;

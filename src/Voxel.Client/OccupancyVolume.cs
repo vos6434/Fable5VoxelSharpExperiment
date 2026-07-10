@@ -43,6 +43,11 @@ public sealed class OccupancyVolume : IDisposable
     private readonly HashSet<(int, int, int)> _uploaded = new();
     private readonly HashSet<(int, int, int)> _dirty = new();
 
+    /// <summary>World y of the highest solid voxel per uploaded chunk — feeds ContentTopWorldY.</summary>
+    private readonly Dictionary<(int, int, int), int> _chunkTopY = new();
+    private int _contentTopY = int.MinValue;
+    private bool _contentTopDirty;
+
     private (int X, int Y, int Z) _originChunk = (int.MinValue, 0, 0);
     private int _cursor;
 
@@ -89,6 +94,30 @@ public sealed class OccupancyVolume : IDisposable
 
     /// <summary>Min-corner chunk coordinate (the light volume follows this).</summary>
     public (int X, int Y, int Z) OriginChunk => _originChunk;
+
+    /// <summary>
+    /// World y of the highest solid voxel currently in the volume (int.MinValue
+    /// when empty). Shadow/skylight marches exit once a ray rises above it —
+    /// over open terrain that cuts ~90-step marches to a handful (perf fix,
+    /// found at 14 fps over the ocean where every water + seabed fragment paid
+    /// two near-full marches).
+    /// </summary>
+    public int ContentTopWorldY
+    {
+        get
+        {
+            if (_contentTopDirty)
+            {
+                _contentTopDirty = false;
+                _contentTopY = int.MinValue;
+                foreach (int top in _chunkTopY.Values)
+                {
+                    if (top > _contentTopY) _contentTopY = top;
+                }
+            }
+            return _contentTopY;
+        }
+    }
 
     public void Bind(TextureUnit unit)
     {
@@ -141,16 +170,29 @@ public sealed class OccupancyVolume : IDisposable
             // Teleport / first update: nothing carries over.
             ClearTexture();
             _uploaded.Clear();
+            _chunkTopY.Clear();
+            _contentTopDirty = true;
             return;
         }
 
         // Toroidal scroll: chunks still in range keep their slab. Drop the ones
         // that scrolled out and zero the slabs of newly-entered coords (they
         // alias the departed chunks' slabs) so stale occupancy can't shadow.
-        _uploaded.RemoveWhere(c =>
+        bool OutOfRegion((int, int, int) c) =>
             c.Item1 < origin.X || c.Item1 >= origin.X + RegionChunks ||
             c.Item2 < origin.Y || c.Item2 >= origin.Y + RegionChunks ||
-            c.Item3 < origin.Z || c.Item3 >= origin.Z + RegionChunks);
+            c.Item3 < origin.Z || c.Item3 >= origin.Z + RegionChunks;
+        _uploaded.RemoveWhere(OutOfRegion);
+        List<(int, int, int)>? evict = null;
+        foreach (var key in _chunkTopY.Keys)
+        {
+            if (OutOfRegion(key)) (evict ??= new List<(int, int, int)>()).Add(key);
+        }
+        if (evict is not null)
+        {
+            foreach (var key in evict) _chunkTopY.Remove(key);
+            _contentTopDirty = true;
+        }
         for (int dx = 0; dx < RegionChunks; dx++)
             for (int dy = 0; dy < RegionChunks; dy++)
                 for (int dz = 0; dz < RegionChunks; dz++)
@@ -180,11 +222,20 @@ public sealed class OccupancyVolume : IDisposable
     private unsafe void UploadChunk(int cx, int cy, int cz, ushort[] blocks)
     {
         // Transpose ChunkData order (x fastest, then z, then y) into GL 3D order
-        // (x fastest, then y, then z), writing occupancy per voxel.
+        // (x fastest, then y, then z), writing occupancy per voxel and tracking
+        // the chunk's highest solid for ContentTopWorldY.
+        int topLocalY = -1;
         for (int y = 0; y < S; y++)
             for (int z = 0; z < S; z++)
                 for (int x = 0; x < S; x++)
-                    _scratch[(z * S + y) * S + x] = OccVoxel(blocks[(y * S + z) * S + x]);
+                {
+                    byte occ = OccVoxel(blocks[(y * S + z) * S + x]);
+                    _scratch[(z * S + y) * S + x] = occ;
+                    if (occ != 0) topLocalY = y;
+                }
+        if (topLocalY >= 0) _chunkTopY[(cx, cy, cz)] = cy * S + topLocalY;
+        else _chunkTopY.Remove((cx, cy, cz));
+        _contentTopDirty = true;
 
         _gl.BindTexture(TextureTarget.Texture3D, _texture);
         fixed (byte* p = _scratch)
