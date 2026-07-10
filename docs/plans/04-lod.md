@@ -1,130 +1,169 @@
-# Plan 04 — LOD for chunks and contraptions
+# Plan 04 — LOD for chunks and contraptions (v2)
 
 **Size:** L · **Depends on:** 03 (contraption tier) · **Unblocks:** better maps context (05)
 
+> **v2 revamp (2026-07-10).** The v1 plan (majority-vote downsampling, two
+> fixed per-chunk rings, vertical band, skirts + exact stitching) produced
+> visible ring seams, erased surface blocks at distance, and ~1300 draws.
+> This revision is modeled on the two Minecraft LOD mods that solve the
+> blend-and-looks problem convincingly:
+> - **Voxy** (github.com/MCRcortex/voxy) — octree mip pyramid of 32³-voxel
+>   sections; mip picks the *most opaque* child voxel, tie toward the top;
+>   real block textures on packed quads; parent sections render until all
+>   children are ready (hole-free hierarchical refinement).
+> - **Distant Horizons** (gitlab.com/distant-horizons-team/distant-horizons)
+>   — per-column RLE data points in 64×64 sections; coarser levels
+>   *subsample* (never vote); merged quads per section; **no skirts** —
+>   seams vanish under generous overdraw (LODs render underneath/behind
+>   nearer terrain) plus fog; SQLite store with lazy upward propagation.
+
 ## Goal
 
-See ~32 chunks (512 blocks) into the world at high FPS: full detail near the
-player, two rings of progressively coarser terrain beyond, and distance-
-scaled sync/rendering for physics contraptions.
+See ≥ 32 chunks (512 blocks) into the world at high FPS — architecture
+extends to 64+ by adding one level per doubling. Full detail near the
+player; each LOD level doubles cell size and covers double the radius;
+distance-scaled sync for physics contraptions.
 
-## Locked decisions
+## Locked decisions (v2)
 
-- Target reach **~32 chunks (512 blocks)**:
-  - **LOD0** — full detail, radius 8 chunks (up from 6).
-  - **LOD1** — 2× downsampled (16³ → 8³ cells of 2-block size), to 16 chunks.
-  - **LOD2** — 4× downsampled, to 32 chunks.
-- Server-side downsampling with DB caching (clients stay thin; edits
-  invalidate).
+- **Sections, not chunks.** LOD level ℓ ≥ 1 is stored/streamed/meshed as
+  cubic *sections* of 16³ cells with cell size 2^ℓ blocks, covering 2^ℓ
+  chunks per axis (section coords = chunk coords >> ℓ). Every level's
+  payload is the same shape as a chunk (16³ u16, deflated) — the wire
+  format, DB schema, and mesher are level-invariant. One mesh per section
+  keeps draws roughly constant per level.
+- **Levels 1..3 initially** (2×, 4×, 8× cells; 32→64 chunk reach), pyramid
+  built level-from-level-below server-side; adding level 4 later is config,
+  not code.
+- **Voxy mip rule, not majority vote:** a cell takes the *most opaque* of
+  its 8 child cells, ties broken toward the topmost corner. Surfaces keep
+  their block identity (grass stays grass, snow stays snow); coarse terrain
+  is always ≥ the fine terrain it covers (no sunken seams, no erased
+  floors). Air only where all 8 children are air.
+- **No vertical band.** All generated cy participate; all-air sections cost
+  a zero-length cached blob and an empty wire payload.
+- **Overdraw instead of stitching (DH-style).** No skirts, no cross-ring
+  neighbor culling, no exact seams. Each level's ring *overlaps* the finer
+  region below it by ~25% of the finer radius; coarser geometry draws
+  depth-biased behind finer geometry and only shows where finer coverage is
+  absent. Because the mip rounds *up* toward solid, the coarse copy under
+  fine terrain never pokes through in silhouette-relevant ways.
+- **Real textures, world-anchored UVs** (we already have this — our blocks
+  are plain atlas cubes, so we get Voxy's "blocks still look like blocks"
+  for free, no model bakery needed).
+- **Server-side pyramid with DB cache + lazy invalidation** (kept from v1;
+  schema gains nothing new, rows are just section-keyed per level).
 
 ## Design
 
 ### Data & serving
 
-- **Downsample:** 2×2×2 (then 4×4×4) majority vote of non-air blocks; water
-  counts as air unless the cell is majority-water (keeps oceans intact,
-  drops shoreline slivers). Produced from stored/generated chunks on demand.
-- **Vertical bound:** LOD columns cover a fixed band (coarse-y equivalents of
-  world y −64…+80) — distant hell/deep stone is invisible anyway; keeps
-  memory linear in radius².
-- **Caching:** `lods` table keyed (level, cx, cy, cz) with deflated blobs;
-  edit to any source chunk marks its LOD ancestors dirty (regenerated
-  lazily on next request).
-- **Protocol:** `ChunkRequest` gains a `level` byte (0 = today's behavior,
-  wire-compatible extension); `ChunkData` echoes it. LOD payloads are 8× /
-  64× smaller than full chunks.
+- **Downsample:** `ChunkLod` mips 2×2×2 → 1 with the Voxy rule. Opacity
+  ranking: opaque solid > translucent non-air (water/ice/glass) > air; among
+  equals the topmost child (then lowest id) wins deterministically. Level 1
+  sections mip from 8 source chunks; level ℓ from 8 level ℓ−1 sections —
+  building the pyramid touches each level once, not the raw chunks 8^ℓ times.
+- **DB:** existing `lods` table, rows keyed (level, sx, sy, sz), deflated
+  16³ u16 cells, zero-length = all air. `lodAlgoVersion` meta wipe stays.
+- **Invalidation:** a block edit at chunk (cx,cy,cz) deletes ancestor rows
+  (ℓ, cx>>ℓ, cy>>ℓ, cz>>ℓ) for ℓ = 1..maxLevel and evicts the memory cache;
+  rebuilt lazily on next request (DH's propagation, simplified to delete).
+- **Protocol:** unchanged from v9 — `ChunkRequest(level, coords)` where
+  coords are section coords for level ≥ 1; `ChunkData` echoes the level.
+  Payloads are level-invariant in size (~1–2 KB deflated per section).
 
-### Client streaming & rendering
+### Client streaming
 
-- Three concentric request spheres (nearest-first within each ring; LOD0
-  keeps absolute priority — coarse rings only stream on leftover budget).
-- **Meshing:** the greedy mesher runs unchanged on 8³/4³ grids with a block
-  scale factor; UVs stay world-anchored so textures tile at world scale
-  (distant terrain keeps the same texel density look).
-- **Draw-call budget:** coarse meshes merged 2×2×2 coarse-chunks per mesh →
-  LOD1 ≈ LOD0 draw count, LOD2 much lower; target < 600 draws total with
-  frustum culling (P7) applying to all rings.
-- **Seams:** ring boundaries get **skirts** (downward-extruded edge quads,
-  Distant Horizons-style) instead of exact stitching — cheap and invisible
-  from grazing angles. Inner-ring geometry always wins the depth test
-  (drawn after, slight depth bias on coarse rings).
-- **Transitions:** a chunk crossing a ring boundary swaps mesh only when the
-  replacement is ready (no holes); fog now starts inside LOD2
-  (near = 384, far = 512) so pops hide in haze. Hell fog override unchanged.
-- **Lighting at distance (02 interplay):** LOD rings skip voxel light
-  (skylight-only shading + sun shadow term from cascade 2 or none) —
-  distant colored light is imperceptible; keeps relight cost bounded.
+- Per-level request rings, nearest-section-first: level ℓ covers section
+  distance up to R·2^ℓ… i.e. chunk radius [0.75·R·2^(ℓ−1), R·2^ℓ] with the
+  inner 25% overlapping the finer level (overdraw region). LOD0 keeps
+  absolute priority; level ℓ streams only when every finer level's cursor
+  is exhausted (leftover budget, shared in-flight cap).
+- **Hole-free refinement (Voxy-style, CPU):** a section renders while any
+  of its footprint lacks a finer rendered replacement. Concretely: render
+  level ℓ section unless all 8 child footprints are covered (child section
+  meshed, or — for ℓ=1 — the 8 underlying chunks all have Done LOD0
+  meshes). Coarse-under-fine overlap is expected and harmless (depth bias);
+  the rule only exists so far terrain never blinks out.
+- **Unload** with hysteresis both outward and inward per level (moved-away
+  overlap sections shed instead of accumulating under the fine region).
 
-### Contraption LOD (03 interplay)
+### Meshing & rendering
 
-- **Near (inside LOD0):** full 10 Hz sync + full mesh (today's behavior).
-- **Mid (LOD1 ring):** server drops that client's entity updates to 1 Hz;
-  client interpolates over the longer window; mesh unchanged (contraptions
-  are small relative to terrain).
-- **Far (LOD2 ring):** transform frozen at last-known (asleep-looking),
-  no per-tick sync; ≥ 250-block contraptions swap to a 2× downsampled mesh.
-- Per-client interest management lives server-side (distance bucket per
-  entity per client, reevaluated on player chunk crossings).
+- Greedy mesher already runs on any (cellsPerAxis, cellSize) grid; sections
+  mesh as 16³ grids with same-level neighbor sections for face culling
+  (missing neighbor = air; the resulting interior walls sit in the overlap
+  region, hidden behind finer terrain). Baked AO stays (cheap, looks good).
+  Skirt emission is deleted.
+- Draw order per pass: fine → coarse with increasing polygon offset
+  (LOD0 none, level ℓ offset ∝ ℓ), so finer always wins the depth test.
+  Liquid-surface pass mirrors solids (depth writes make overlap safe);
+  translucent pass renders only the finest available section per footprint
+  (no depth writes → double-blend otherwise).
+- **Budget target:** < 600 draws total at 32-chunk reach: LOD0 ≈ 300–400
+  visible chunk meshes + ~16³-section rings ≈ 50–150 section meshes per
+  level. Stretch (post-M4): pack per-level section quads into one shared
+  buffer and issue one multi-draw per level, Voxy-style.
+- **Fog & sky:** fog completes just inside the outermost level's edge; fog
+  color must be sampled from the same gradient the sky shader uses at the
+  horizon so fully-fogged LODs melt into the sky instead of silhouetting
+  (grey-blob bug from v1 M2).
+- **Lighting at distance:** skylight-only (occupancy/light volumes don't
+  reach LOD rings; chunk.frag falls back to open-sky shading out there —
+  shipped in v1 M2, keep). Distant colored light is imperceptible.
+
+### Contraption LOD (03 interplay — unchanged from v1)
+
+- Near (LOD0): full 10 Hz sync + full mesh. Mid: 1 Hz updates, client
+  interpolates. Far: frozen transform, ≥250-block contraptions swap to a
+  2× downsampled mesh. Per-client interest buckets server-side.
+
+## Shipped groundwork (v1, kept)
+
+- Protocol v9 level byte; `lods` table (format v3) + `lodAlgoVersion` wipe;
+  offline mode for verification; greedy mesher parameterized by grid/cell
+  size; per-level streaming with leftover-budget priority; polygon-offset
+  LOD passes; chunk.frag skyVisibility fixes (outside-region and
+  below-region handling). The v1 per-chunk LOD1 ring, majority vote,
+  vertical band, skirts, and underlap-shell special cases get replaced.
 
 ## Milestones
 
-1. **Protocol + server downsampling** — request LOD1 blobs, verified by a
-   unit test (majority-vote correctness) and a hexdump-scale sanity check.
-
-   **DONE (2026-07-09).** Protocol v9 (ChunkRequest lodLevel byte, echoed in
-   ChunkData), ChunkLod majority-vote downsampler (solid wins at ≥ half,
-   else water at ≥ half, else air; ties to lower id), lods DB cache
-   (format v3) with per-edit invalidation, vertical band cy −4…+4.
-   Client decodes levelled payloads but still streams level 0 only.
-   Also shipped alongside: offline mode (client-embedded ServerHost), so
-   verification runs (`--screenshot`) no longer need a separate server.
-2. **LOD1 ring rendered** — 16-chunk vistas; skirts; screenshot comparison
-   with a full-detail reference render of the same area.
-
-   **DONE (2026-07-09).** LOD0 radius 8, LOD1 ring to 16 (data to 17),
-   band-limited, streamed on leftover budget. Greedy mesher parameterized by
-   cells-per-axis/cell-size; skirts on LOD side borders (skipped under
-   water/ice caps). Deviations from the sketch above, learned on screenshots:
-   - Vote rounds surfaces *down* (solid needs a strict majority; ChunkLod
-     AlgoVersion invalidates cached blobs) so coarse terrain never rises
-     above the full detail it approximates.
-   - **Underlap** instead of exact stitching at the inner boundary: LOD1
-     also renders depth-biased *under* full-detail chunks in a radius-10
-     shell, sealing boundary cracks (fine meshes cull border faces against
-     full neighbor data that isn't what actually renders beside them).
-     Translucent pass excluded (no depth writes → double-blend band).
-   - Two chunk.frag skyVisibility fixes: horizontally-outside-region check
-     now precedes the below-region check, and below-region fragments march
-     from the volume floor instead of reading as underground (the camera-
-     centered volume lifts off the terrain at altitude, which blacked out
-     a volume-sized square of seabed — it read as a false "LOD seam ring"
-     for a while).
-   Left for later milestones: draws ~1300 at spawn vista (merging, M3);
-   fog-color vs sky-gradient mismatch leaves grey silhouettes at the far
-   ring edge (M6); LOD1 chunks don't yet re-request on distant edits (M4).
-3. **LOD2 + merging** — full 32-chunk reach; draw/tri budget measured.
-4. **Edit invalidation** — break a mountain top; the distant view updates
-   within seconds of the LOD cache refresh.
-5. **Contraption tiers** — sync-rate scaling + far-freeze; verified with a
-   witness client parked far away counting messages.
-6. **Tuning pass** — fog placement, pop masking, budget targets met at
-   spawn, mountains, and hell.
+1. ~~Protocol + server downsampling~~ **DONE (v1, 2026-07-09)** — revisit:
+   swap vote → Voxy mip (**M2v2**).
+2. **Sections + mip rule** — server builds the level 1..3 pyramid from
+   section mips (level-from-level-below); `ChunkLod` implements the
+   opacity/topmost rule; unit tests pin mip semantics (grass-top survival,
+   water/translucent ranking, determinism); protocol serves section coords.
+   Client streams + renders level 1 sections only (16-chunk reach) with
+   overdraw blending; the v1 chunk-ring path is deleted.
+3. **Levels 2–3 + refinement** — full 32→64 chunk reach; hole-free
+   hierarchical swap rule; draw/tri budget measured at spawn, mountains,
+   ocean; fog/sky horizon match.
+4. **Edit invalidation end-to-end** — break a mountain top; ancestors
+   regenerate; client re-requests affected sections (server pushes a
+   section-dirty notice or client polls on BlockUpdate outside LOD0).
+5. **Contraption tiers** — sync-rate scaling + far-freeze (unchanged).
+6. **Tuning pass** — pop masking, budgets, hell; stretch: shared quad
+   buffer + one multi-draw per level.
 
 ## Verification
 
-- `--screenshot` panoramas at spawn and from a mountain top; before/after
-  FPS + draws/tris in the HUD line.
-- Bandwidth: initial join payload measured (target < 8 MB for full 32-chunk
-  reveal); steady-state traffic while flying.
-- Memory: client mesh memory reported in stats HUD.
+- Screenshot panoramas (spawn, mountain top, ocean, high altitude) at each
+  milestone; draws/tris/FPS in HUD; a "LOD level tint" debug view to check
+  ring placement and refinement (both mods ship one — invaluable).
+- Bandwidth: initial join payload target < 8 MB at 32-chunk reach;
+  steady-state while flying.
+- Correctness: mip unit tests; a golden test that the level-1 mip of a
+  known chunk matches a hand-computed fixture.
 
 ## Risks & open questions
 
-- Majority-vote downsampling can erase thin features (trees later, pillars)
-  — acceptable v1; a "prefer-solid" bias flag is a one-line experiment.
-- Skirt color mismatch at biome dithering boundaries — likely invisible in
-  fog; revisit if screenshots say otherwise.
-- LOD relighting is deliberately skipped — when 02 ships after 04 in
-  calendar terms this is moot (order says 02 first anyway).
-- Open: should LOD2 render underground at all? (Plan: no — coarse rings cull
-  chunks fully below the heightmap band; caves stay LOD0-only.)
+- Most-opaque mip inflates terrain slightly (bushes → solid blobs at 8×);
+  acceptable — both reference mods do exactly this and it reads fine.
+- Level ≥ 1 sections mesh with same-level neighbors; at level ring edges
+  the outermost sections wait for neighbors (data radius = render radius
+  + 1 section, as today).
+- Water at 8× cells: translucent ranking keeps oceans; shorelines wobble
+  by up to 8 blocks at the farthest ring — hidden by fog distance.
+- Contraption LOD interplay unchanged and still speculative until M5.
