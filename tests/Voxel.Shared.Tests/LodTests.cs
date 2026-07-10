@@ -5,129 +5,125 @@ using Voxel.Shared;
 
 namespace Voxel.Shared.Tests;
 
-/// <summary>Majority-vote downsampling correctness (plan 04 M1).</summary>
+/// <summary>Voxy-style mip correctness (plan 04 v2 M2): most opaque of 8 children, ties toward the top.</summary>
 public class ChunkLodTests
 {
     private const ushort Stone = 1;
-    private const ushort Dirt = 2;
-    private const ushort Water = 9;
+    private const ushort Grass = 2;
+    private const ushort Water = 3;
 
-    private static ushort[] Chunk(ushort fill = 0)
+    // Rank: air < translucent (water) < opaque (stone, grass).
+    private static readonly byte[] Opaque = [0, 1, 1, 0];
+
+    private static ushort[] Grid(ushort fill = 0)
     {
-        var blocks = new ushort[Constants.ChunkVolume];
-        if (fill != 0) Array.Fill(blocks, fill);
-        return blocks;
+        var cells = new ushort[Constants.ChunkVolume];
+        if (fill != 0) Array.Fill(cells, fill);
+        return cells;
     }
 
-    private static void FillBox(ushort[] blocks, int x0, int y0, int z0, int x1, int y1, int z1, ushort id)
+    private static void FillBox(ushort[] cells, int x0, int y0, int z0, int x1, int y1, int z1, ushort id)
     {
         for (int y = y0; y <= y1; y++)
         for (int z = z0; z <= z1; z++)
         for (int x = x0; x <= x1; x++)
         {
-            blocks[ChunkData.Index(x, y, z)] = id;
+            cells[ChunkData.Index(x, y, z)] = id;
         }
     }
 
-    [Fact]
-    public void Uniform_chunk_downsamples_to_uniform_cells()
+    private static ushort[]?[] Children(params (int Dx, int Dy, int Dz, ushort[] Grid)[] filled)
     {
-        foreach (int level in (int[])[1, 2])
+        var children = new ushort[]?[8];
+        foreach (var (dx, dy, dz, grid) in filled)
         {
-            ushort[] cells = ChunkLod.Downsample(Chunk(Stone), level, Water);
-            Assert.Equal(ChunkLod.CellCount(level), cells.Length);
-            Assert.All(cells, id => Assert.Equal(Stone, id));
+            children[ChunkLod.ChildIndex(dx, dy, dz)] = grid;
         }
-        Assert.Equal(512, ChunkLod.CellCount(1));
-        Assert.Equal(64, ChunkLod.CellCount(2));
+        return children;
     }
 
     [Fact]
-    public void Surfaces_round_down_solid_needs_strict_majority()
+    public void Uniform_children_mip_to_uniform_parent()
     {
-        // Flat slab: bottom half of every level-1 cell in the y=0 row — exactly
-        // half is NOT a strict majority, so the surface rounds down to air
-        // (coarse terrain must never rise above the full-detail terrain).
-        var blocks = Chunk();
-        FillBox(blocks, 0, 0, 0, 15, 0, 15, Stone);
-        Assert.All(ChunkLod.Downsample(blocks, 1, Water), id => Assert.Equal(0, id));
-
-        // Add an x=0 strip at y=1: cells (0, 0, z) now hold 4 (slab) + 2 = 6 of
-        // 8 — a strict majority → stone. Cells (1, 0, z) stay at 4 → air.
-        var majority = Chunk();
-        FillBox(majority, 0, 0, 0, 15, 0, 15, Stone);
-        FillBox(majority, 0, 1, 0, 0, 1, 15, Stone);
-        ushort[] cells = ChunkLod.Downsample(majority, 1, Water);
-        for (int z = 0; z < 8; z++) Assert.Equal(Stone, cells[z * 8]);
-        Assert.Equal(0, cells[1]);
+        var children = new ushort[]?[8];
+        for (int i = 0; i < 8; i++) children[i] = Grid(Stone);
+        ushort[]? cells = ChunkLod.MipSections(children, Opaque);
+        Assert.NotNull(cells);
+        Assert.All(cells, id => Assert.Equal(Stone, id));
     }
 
     [Fact]
-    public void Sub_majority_solid_sliver_erases()
+    public void All_air_children_mip_to_null()
     {
-        var blocks = Chunk();
-        blocks[ChunkData.Index(4, 4, 4)] = Stone; // 1 of 8 in its level-1 cell
-        ushort[] cells = ChunkLod.Downsample(blocks, 1, Water);
-        Assert.All(cells, id => Assert.Equal(0, id));
-
-        // Same sliver at level 2: a full 2×2×2 blob is 8 of 64 — still erased.
-        FillBox(blocks, 4, 4, 4, 5, 5, 5, Stone);
-        Assert.All(ChunkLod.Downsample(blocks, 2, Water), id => Assert.Equal(0, id));
+        Assert.Null(ChunkLod.MipSections(new ushort[]?[8], Opaque));
+        Assert.Null(ChunkLod.MipSections(Children((0, 0, 0, Grid())), Opaque));
     }
 
     [Fact]
-    public void Water_wins_at_half_when_solids_lack_a_majority()
+    public void Grass_top_survives_over_dirt()
     {
-        // Half water, half air → water (ocean surface cells survive).
-        var blocks = Chunk();
-        FillBox(blocks, 0, 0, 0, 1, 0, 1, Water);
-        Assert.Equal(Water, ChunkLod.Downsample(blocks, 1, Water)[0]);
-
-        // Half water, half stone: no strict solid majority → water (the coarse
-        // seabed rounds down; the stone shows on the fine-detail side instead).
-        FillBox(blocks, 0, 1, 0, 1, 1, 1, Stone);
-        Assert.Equal(Water, ChunkLod.Downsample(blocks, 1, Water)[0]);
-
-        // 5 stone, 3 water → stone (strict solid majority beats water).
-        var shore = Chunk();
-        FillBox(shore, 0, 0, 0, 1, 1, 1, Stone);
-        shore[ChunkData.Index(0, 0, 0)] = Water;
-        shore[ChunkData.Index(1, 0, 0)] = Water;
-        shore[ChunkData.Index(0, 1, 0)] = Water;
-        Assert.Equal(Stone, ChunkLod.Downsample(shore, 1, Water)[0]);
-
-        // 3 water, 5 air → air (below half, water counts as air).
-        var sparse = Chunk();
-        sparse[ChunkData.Index(0, 0, 0)] = Water;
-        sparse[ChunkData.Index(1, 0, 0)] = Water;
-        sparse[ChunkData.Index(0, 1, 0)] = Water;
-        Assert.Equal(0, ChunkLod.Downsample(sparse, 1, Water)[0]);
+        // A grass layer over stone: the 2×2×2 source of each surface cell has
+        // 4 stone below, 4 grass on top — equal opacity, topmost corner wins.
+        var child = Grid();
+        FillBox(child, 0, 0, 0, 15, 0, 15, Stone);
+        FillBox(child, 0, 1, 0, 15, 1, 15, Grass);
+        ushort[]? cells = ChunkLod.MipSections(Children((0, 0, 0, child)), Opaque);
+        Assert.NotNull(cells);
+        for (int z = 0; z < 8; z++)
+        for (int x = 0; x < 8; x++)
+        {
+            Assert.Equal(Grass, cells[ChunkData.Index(x, 0, z)]);
+        }
     }
 
     [Fact]
-    public void Solid_tie_breaks_to_lower_id()
+    public void Opacity_ranks_opaque_over_translucent_over_air()
     {
-        // 4 dirt + 4 stone = 8 solid of 8 (strict majority); the dirt/stone
-        // tie breaks to the lower numeric id (stone).
-        var blocks = Chunk();
-        FillBox(blocks, 0, 0, 0, 1, 0, 1, Dirt);
-        FillBox(blocks, 0, 1, 0, 1, 1, 1, Stone);
-        Assert.Equal(Stone, ChunkLod.Downsample(blocks, 1, Water)[0]);
+        // 1 stone + 7 water → stone (opaque beats translucent, count irrelevant).
+        var child = Grid();
+        FillBox(child, 0, 0, 0, 1, 1, 1, Water);
+        child[ChunkData.Index(0, 0, 0)] = Stone;
+        ushort[]? cells = ChunkLod.MipSections(Children((0, 0, 0, child)), Opaque);
+        Assert.NotNull(cells);
+        Assert.Equal(Stone, cells[ChunkData.Index(0, 0, 0)]);
+
+        // 1 water + 7 air → water (never erase the only non-air block).
+        var sparse = Grid();
+        sparse[ChunkData.Index(2, 2, 2)] = Water;
+        cells = ChunkLod.MipSections(Children((0, 0, 0, sparse)), Opaque);
+        Assert.NotNull(cells);
+        Assert.Equal(Water, cells[ChunkData.Index(1, 1, 1)]);
     }
 
     [Fact]
-    public void Cell_index_order_matches_chunk_layout()
+    public void Single_block_never_erases()
     {
-        // Fill exactly the source region of level-1 cell (x=3, y=5, z=2).
-        var blocks = Chunk();
-        FillBox(blocks, 6, 10, 4, 7, 11, 5, Stone);
-        ushort[] cells = ChunkLod.Downsample(blocks, 1, Water);
-        Assert.Equal(Stone, cells[(5 * 8 + 2) * 8 + 3]);
+        // The Voxy rule keeps thin features: 1 solid of 8 still wins the cell.
+        var child = Grid();
+        child[ChunkData.Index(5, 9, 3)] = Stone;
+        ushort[]? cells = ChunkLod.MipSections(Children((0, 0, 0, child)), Opaque);
+        Assert.NotNull(cells);
+        Assert.Equal(Stone, cells[ChunkData.Index(2, 4, 1)]);
         Assert.Equal(1, cells.Count(id => id != 0));
+    }
+
+    [Fact]
+    public void Children_land_in_their_octants()
+    {
+        // Child (1,0,1) full stone → parent cells x 8..15, y 0..7, z 8..15.
+        ushort[]? cells = ChunkLod.MipSections(Children((1, 0, 1, Grid(Stone))), Opaque);
+        Assert.NotNull(cells);
+        for (int y = 0; y < 16; y++)
+        for (int z = 0; z < 16; z++)
+        for (int x = 0; x < 16; x++)
+        {
+            ushort expected = (ushort)(x >= 8 && y < 8 && z >= 8 ? Stone : 0);
+            Assert.Equal(expected, cells[ChunkData.Index(x, y, z)]);
+        }
     }
 }
 
-/// <summary>LOD blob caching and edit invalidation in the world store (plan 04 M1).</summary>
+/// <summary>Section pyramid caching and edit invalidation in the world store (plan 04 v2 M2).</summary>
 public class LodStoreTests : IDisposable
 {
     private readonly List<string> _tempPaths = [];
@@ -140,6 +136,7 @@ public class LodStoreTests : IDisposable
             TryDelete(path);
             TryDelete(path + "-wal");
             TryDelete(path + "-shm");
+            TryDelete(path + ".lock");
         }
     }
 
@@ -151,95 +148,104 @@ public class LodStoreTests : IDisposable
     private string TempDb() =>
         _tempPaths.Append(Path.Combine(Path.GetTempPath(), $"voxel-lod-{Guid.NewGuid():N}.db")).Last();
 
-    private static ushort[] Inflate(byte[] blob, int cellCount)
+    private static ushort[] Inflate(byte[] blob)
     {
         using var input = new MemoryStream(blob);
         using var inflate = new DeflateStream(input, CompressionMode.Decompress);
         using var output = new MemoryStream();
         inflate.CopyTo(output);
         byte[] raw = output.ToArray();
-        Assert.Equal(cellCount * 2, raw.Length);
-        var cells = new ushort[cellCount];
+        Assert.Equal(Constants.ChunkVolume * 2, raw.Length);
+        var cells = new ushort[Constants.ChunkVolume];
         Buffer.BlockCopy(raw, 0, cells, 0, raw.Length);
         return cells;
     }
 
+    private static ushort[]? FetchCells(WorldStore store, int level, int sx, int sy, int sz)
+    {
+        byte[]? blob = store.LoadLodBlob(level, sx, sy, sz);
+        return blob is null ? null : Inflate(blob);
+    }
+
+    /// <summary>Reference mip of a level-1 section straight from the store's chunks.</summary>
+    private static ushort[]? ExpectedLevel1(WorldStore store, BlockRegistry blocks, int sx, int sy, int sz)
+    {
+        var children = new ushort[]?[8];
+        for (int dy = 0; dy < 2; dy++)
+        for (int dz = 0; dz < 2; dz++)
+        for (int dx = 0; dx < 2; dx++)
+        {
+            var chunk = store.Load(sx * 2 + dx, sy * 2 + dy, sz * 2 + dz);
+            children[ChunkLod.ChildIndex(dx, dy, dz)] = chunk.CountSolid() == 0 ? null : chunk.Blocks;
+        }
+        return ChunkLod.MipSections(children, blocks.Opaque);
+    }
+
     [Fact]
-    public void Lod_blob_matches_downsampled_source_and_survives_reopen()
+    public void Level1_and_level2_mip_from_below_and_survive_reopen()
     {
         string path = TempDb();
         var blocks = DataLoader.LoadRegistries(FindDataDir()).Blocks;
         var generator = new WorldGen(WorldGen.DefaultSeed, blocks);
-        ushort water = blocks.Resolve("water");
 
-        ushort[]? FetchCells(WorldStore s, int level, int cx, int cy, int cz)
-        {
-            byte[]? blob = s.LoadLodBlob(level, cx, cy, cz);
-            return blob is null ? null : Inflate(blob, ChunkLod.CellCount(level));
-        }
-
-        // All-air downsamples are served as null (empty), so expectations normalize the same way.
-        static ushort[]? Normalize(ushort[] cells) => cells.All(id => id == 0) ? null : cells;
-
-        ushort[]? expected1, expected2;
+        ushort[]? level1, level2;
         using (var store = new WorldStore(path, generator, blocks))
         {
-            var source = store.Load(0, 0, 0);
-            expected1 = Normalize(ChunkLod.Downsample(source.Blocks, 1, water));
-            expected2 = Normalize(ChunkLod.Downsample(source.Blocks, 2, water));
-            Assert.NotNull(expected1); // chunk (0,0,0) has terrain at LOD1 — keeps the test meaningful
+            level1 = FetchCells(store, 1, 0, 0, 0);
+            Assert.NotNull(level1); // spawn area has terrain
+            Assert.Equal(ExpectedLevel1(store, blocks, 0, 0, 0), level1);
 
-            Assert.Equal(expected1, FetchCells(store, 1, 0, 0, 0));
-            Assert.Equal(expected2, FetchCells(store, 2, 0, 0, 0));
+            // Level 2 must equal the mip of its 8 level-1 children.
+            var children = new ushort[]?[8];
+            for (int dy = 0; dy < 2; dy++)
+            for (int dz = 0; dz < 2; dz++)
+            for (int dx = 0; dx < 2; dx++)
+            {
+                children[ChunkLod.ChildIndex(dx, dy, dz)] = FetchCells(store, 1, dx, dy, dz);
+            }
+            level2 = FetchCells(store, 2, 0, 0, 0);
+            Assert.Equal(ChunkLod.MipSections(children, blocks.Opaque), level2);
         }
 
         // Reopen: blobs come from the lods table (memory cache is gone).
         using (var store = new WorldStore(path, generator, blocks))
         {
-            Assert.Equal(expected1, FetchCells(store, 1, 0, 0, 0));
-            Assert.Equal(expected2, FetchCells(store, 2, 0, 0, 0));
+            Assert.Equal(level1, FetchCells(store, 1, 0, 0, 0));
+            Assert.Equal(level2, FetchCells(store, 2, 0, 0, 0));
         }
     }
 
     [Fact]
-    public void Edit_invalidates_cached_lods()
+    public void Edit_invalidates_ancestors_at_every_level()
     {
         string path = TempDb();
         var blocks = DataLoader.LoadRegistries(FindDataDir()).Blocks;
         var generator = new WorldGen(WorldGen.DefaultSeed, blocks);
         ushort stone = blocks.Resolve("stone");
-        ushort water = blocks.Resolve("water");
 
         using var store = new WorldStore(path, generator, blocks);
-        store.LoadLodBlob(1, 0, 0, 0); // prime memory + DB caches
+        store.LoadLodBlob(1, 0, 1, 0); // prime the caches
+        store.LoadLodBlob(2, 0, 0, 0);
 
-        // Fill level-1 cell (0, 7, 0) of chunk (0,0,0): world y 14..15.
-        for (int y = 14; y <= 15; y++)
+        // Fill a world 2×2×2 region in open sky at (0..1, 60..61, 0..1):
+        // chunk (0,3,0) → level-1 section (0,1,0) cell (0,14,0)
+        //              → level-2 section (0,0,0) cell (0,15,0).
+        for (int y = 60; y <= 61; y++)
         for (int z = 0; z <= 1; z++)
         for (int x = 0; x <= 1; x++)
         {
             store.SetBlock(x, y, z, stone);
         }
 
-        byte[]? blob = store.LoadLodBlob(1, 0, 0, 0);
-        Assert.NotNull(blob);
-        ushort[] cells = Inflate(blob, ChunkLod.CellCount(1));
-        Assert.Equal(stone, cells[(7 * 8 + 0) * 8 + 0]);
-        Assert.Equal(ChunkLod.Downsample(store.Load(0, 0, 0).Blocks, 1, water), cells);
-    }
+        ushort[]? level1 = FetchCells(store, 1, 0, 1, 0);
+        Assert.NotNull(level1);
+        Assert.Equal(stone, level1[ChunkData.Index(0, 14, 0)]);
+        Assert.Equal(ExpectedLevel1(store, blocks, 0, 1, 0), level1);
 
-    [Fact]
-    public void Out_of_band_chunks_serve_empty_without_generating()
-    {
-        string path = TempDb();
-        var blocks = DataLoader.LoadRegistries(FindDataDir()).Blocks;
-        var generator = new WorldGen(WorldGen.DefaultSeed, blocks);
-
-        using var store = new WorldStore(path, generator, blocks);
-        int before = store.ChunkCount;
-        Assert.Null(store.LoadLodBlob(1, 0, ChunkLod.BandMaxCy + 1, 0));
-        Assert.Null(store.LoadLodBlob(2, 0, ChunkLod.BandMinCy - 1, 0));
-        Assert.Equal(before, store.ChunkCount); // no source chunks were generated
+        // The Voxy mip never erases a solid: the edit survives to level 2 too.
+        ushort[]? level2 = FetchCells(store, 2, 0, 0, 0);
+        Assert.NotNull(level2);
+        Assert.Equal(stone, level2[ChunkData.Index(0, 15, 0)]);
     }
 
     private static string FindDataDir()

@@ -1,105 +1,84 @@
 namespace Voxel.Shared;
 
 /// <summary>
-/// Chunk downsampling for distant terrain (plan 04). An LOD chunk shares its
-/// source chunk's coordinates but stores (16 &gt;&gt; level)³ cells of
-/// (1 &lt;&lt; level)-block size: LOD1 = 8³ cells of 2 blocks, LOD2 = 4³ of 4.
-/// Cells vote: a cell becomes the most common solid block when solids fill a
-/// strict majority — surfaces round *down*, so coarse terrain never rises
-/// above the full-detail terrain it approximates (a raised coarse seabed drew
-/// a bright cliff ring at the ring boundary; sunken seams hide under water or
-/// behind skirts). Otherwise water when water fills at least half (oceans
-/// stay at sea level), else air. Sub-half features erase — accepted v1
-/// trade-off.
+/// Section-based LOD pyramid (plan 04 v2, Voxy/Distant Horizons model). A
+/// level-ℓ *section* covers 2^ℓ chunks per axis (section coords = chunk
+/// coords &gt;&gt; ℓ) and stores the same 16³ u16 grid as a chunk, with cells
+/// of 2^ℓ blocks — so the wire format, DB rows, and mesher are
+/// level-invariant. Level ℓ mips from the 8 level ℓ−1 children (level 1
+/// from the 8 source chunks).
+///
+/// Mip rule (Voxy): each cell takes the *most opaque* of its 8 child cells,
+/// ties broken toward the topmost corner (then z, then x). Surfaces keep
+/// their block identity — grass stays grass — and coarse terrain always
+/// covers at least what the fine terrain does, so overdraw blending never
+/// shows sunken seams. Air only where all 8 children are air.
 /// </summary>
 public static class ChunkLod
 {
-    public const int MaxLevel = 2;
+    public const int MaxLevel = 3;
 
-    /// <summary>Bump when the vote rules change: stored LOD blobs are stale and get regenerated.</summary>
-    public const int AlgoVersion = 2;
+    /// <summary>Bump when the mip rules change: stored LOD blobs are stale and get regenerated.</summary>
+    public const int AlgoVersion = 3;
 
-    /// <summary>
-    /// Vertical band LOD rings cover, in chunk coords (world y −64…+80).
-    /// Distant hell/deep stone is invisible anyway; keeps memory and DB cache
-    /// linear in radius². Outside the band LOD requests serve empty.
-    /// </summary>
-    public const int BandMinCy = -4;
-    public const int BandMaxCy = 4;
+    /// <summary>World blocks per cell at a level (level 0 = 1).</summary>
+    public static int CellSize(int level) => 1 << level;
 
-    public static bool InBand(int cy) => cy is >= BandMinCy and <= BandMaxCy;
-
-    /// <summary>Cells per axis of an LOD chunk (level 0 = full 16).</summary>
-    public static int CellsPerAxis(int level) => Constants.ChunkSize >> level;
-
-    public static int CellCount(int level)
-    {
-        int n = CellsPerAxis(level);
-        return n * n * n;
-    }
+    /// <summary>Child index inside a parent section, matching the mip input array order.</summary>
+    public static int ChildIndex(int dx, int dy, int dz) => (dy << 2) | (dz << 1) | dx;
 
     /// <summary>
-    /// Downsamples one chunk's blocks to LOD cells. Output uses the same
-    /// x-fastest, then z, then y index order as <see cref="ChunkData"/> at the
-    /// reduced size, so the wire/mesher code paths stay shape-agnostic.
+    /// Mips 8 child grids (16³ each, <see cref="ChildIndex"/> order, null =
+    /// all air) into one parent 16³ grid. <paramref name="opaque"/> is the
+    /// registry's opacity table; ranking is opaque &gt; non-air &gt; air.
+    /// Returns null when every child is null (all air).
     /// </summary>
-    public static ushort[] Downsample(ushort[] source, int level, ushort waterId)
+    public static ushort[]? MipSections(ushort[]?[] children, byte[] opaque)
     {
-        if (source.Length != Constants.ChunkVolume)
+        if (children.Length != 8)
         {
-            throw new ArgumentException($"expected {Constants.ChunkVolume} blocks, got {source.Length}", nameof(source));
-        }
-        if (level is < 1 or > MaxLevel)
-        {
-            throw new ArgumentOutOfRangeException(nameof(level), level, "LOD level must be 1 or 2");
+            throw new ArgumentException($"expected 8 children, got {children.Length}", nameof(children));
         }
 
-        int factor = 1 << level;
-        int n = CellsPerAxis(level);
-        int cellVolume = factor * factor * factor;
-        var cells = new ushort[n * n * n];
+        ushort[]? cells = null;
+        const int S = Constants.ChunkSize;
+        const int Half = S / 2;
 
-        Span<ushort> ids = stackalloc ushort[cellVolume];
-        Span<int> counts = stackalloc int[cellVolume];
-
-        for (int cy = 0; cy < n; cy++)
-        for (int cz = 0; cz < n; cz++)
-        for (int cx = 0; cx < n; cx++)
+        for (int ci = 0; ci < 8; ci++)
         {
-            int distinct = 0;
-            int waterCount = 0;
-            int solidCount = 0;
-            for (int dy = 0; dy < factor; dy++)
-            for (int dz = 0; dz < factor; dz++)
-            for (int dx = 0; dx < factor; dx++)
+            var child = children[ci];
+            if (child is null) continue;
+            if (child.Length != Constants.ChunkVolume)
             {
-                ushort id = source[ChunkData.Index(cx * factor + dx, cy * factor + dy, cz * factor + dz)];
-                if (id == 0) continue;
-                if (id == waterId) { waterCount++; continue; }
-                solidCount++;
-                int slot = 0;
-                while (slot < distinct && ids[slot] != id) slot++;
-                if (slot == distinct) { ids[distinct] = id; counts[distinct] = 0; distinct++; }
-                counts[slot]++;
+                throw new ArgumentException($"child {ci}: expected {Constants.ChunkVolume} cells, got {child.Length}", nameof(children));
             }
 
-            ushort cell = 0;
-            if (solidCount * 2 > cellVolume)
+            // Child ci occupies one octant of the parent grid.
+            int ox = (ci & 1) * Half;
+            int oy = ((ci >> 2) & 1) * Half;
+            int oz = ((ci >> 1) & 1) * Half;
+
+            for (int y = 0; y < Half; y++)
+            for (int z = 0; z < Half; z++)
+            for (int x = 0; x < Half; x++)
             {
-                // Most common solid; ties break to the lower numeric id so the
-                // result is deterministic across runs and implementations.
-                int best = 0;
-                for (int i = 1; i < distinct; i++)
+                // Rank each of the 8 source cells: opacity first, then the
+                // topmost corner (y, then z, then x) breaks ties — a grass
+                // top beats the dirt under it.
+                int best = -1;
+                ushort bestId = 0;
+                for (int corner = 7; corner >= 0; corner--)
                 {
-                    if (counts[i] > counts[best] || (counts[i] == counts[best] && ids[i] < ids[best])) best = i;
+                    int dx = corner & 1, dy = (corner >> 2) & 1, dz = (corner >> 1) & 1;
+                    ushort id = child[ChunkData.Index(x * 2 + dx, y * 2 + dy, z * 2 + dz)];
+                    if (id == 0) continue;
+                    int rank = ((opaque[id] + 1) << 3) | corner;
+                    if (rank > best) { best = rank; bestId = id; }
                 }
-                cell = ids[best];
+                if (best < 0) continue;
+                cells ??= new ushort[Constants.ChunkVolume];
+                cells[ChunkData.Index(ox + x, oy + y, oz + z)] = bestId;
             }
-            else if (waterCount * 2 >= cellVolume)
-            {
-                cell = waterId;
-            }
-            cells[(cy * n + cz) * n + cx] = cell;
         }
         return cells;
     }

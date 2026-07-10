@@ -90,9 +90,8 @@ public static class GreedyMesher
     }
 
     /// <param name="neighbors">Neighbor chunk contents in FACE_DIRS order (px,nx,py,ny,pz,nz); null = treat as air.</param>
-    /// <param name="cellsPerAxis">Grid edge in cells: 16 for full chunks, 8/4 for LOD1/LOD2 (plan 04).</param>
-    /// <param name="cellSize">World blocks per cell (1, 2, 4). Geometry scales; UVs stay block-anchored.</param>
-    /// <param name="skirts">Emit border skirts (LOD rings): downward curtains that hide ring-boundary gaps.</param>
+    /// <param name="cellsPerAxis">Grid edge in cells (16 for chunks and LOD sections alike, plan 04 v2).</param>
+    /// <param name="cellSize">World blocks per cell (2^level). Geometry scales; UVs stay block-anchored.</param>
     public static MeshResult Mesh(
         int cx, int cy, int cz,
         ushort[] blocks,
@@ -103,8 +102,7 @@ public static class GreedyMesher
         byte[] flatAoMask,
         byte[] emissiveMask,
         int cellsPerAxis = Constants.ChunkSize,
-        int cellSize = 1,
-        bool skirts = false)
+        int cellSize = 1)
     {
         int S = cellsPerAxis;
         int ox = cx * Constants.ChunkSize, oy = cy * Constants.ChunkSize, oz = cz * Constants.ChunkSize;
@@ -276,70 +274,6 @@ public static class GreedyMesher
                             u0, v0, u1, v1,
                             renderTable[id * 6 + faceIndex], brightness4, flip);
                     }
-                }
-            }
-        }
-
-        // Skirts (LOD rings, plan 04): a downward curtain along each side
-        // border at the surface height, Distant Horizons-style. Where the
-        // neighboring ring's finer/coarser surface sits lower than ours, the
-        // culled border face would otherwise leave a see-through gap; the
-        // curtain covers it. When surfaces agree it sits buried in terrain.
-        if (skirts)
-        {
-            Span<float> s0 = stackalloc float[3];
-            Span<float> s1 = stackalloc float[3];
-            Span<float> s2 = stackalloc float[3];
-            Span<float> s3 = stackalloc float[3];
-            Span<float> skirtBright = stackalloc float[4];
-            int depth = 2 * cellSize;
-
-            // Border descriptors: normal axis d at plane cell 0 or S, lateral axis u.
-            foreach (var (d, dSlice, faceIndex, u) in (ReadOnlySpan<(int, int, int, int)>)
-                     [(0, S, 0, 2), (0, 0, 1, 2), (2, S, 4, 0), (2, 0, 5, 0)])
-            {
-                int borderCell = dSlice == 0 ? 0 : S - 1;
-                for (int mu = 0; mu < S; mu++)
-                {
-                    // Topmost opaque cell of this border column.
-                    int top = -1;
-                    ushort topId = 0;
-                    int x = d == 0 ? borderCell : mu;
-                    int z = d == 0 ? mu : borderCell;
-                    for (int y = S - 1; y >= 0; y--)
-                    {
-                        ushort id = blocks[Idx(x, y, z)];
-                        if (id != 0 && opaque[id] == 1) { top = y; topId = id; break; }
-                    }
-                    if (top < 0) continue;
-                    // Skip columns capped by water/ice: the seam sits under the
-                    // liquid surface (invisible), and a lit seabed curtain reads
-                    // as a bright ring line through the water instead.
-                    ushort above = top + 1 < S ? blocks[Idx(x, top + 1, z)] : (nPy?[Idx(x, 0, z)] ?? 0);
-                    if (translucentMask[above] == 1) continue;
-
-                    float yTop = (top + 1) * cellSize;
-                    float yBot = yTop - depth;
-                    float plane = dSlice * cellSize;
-                    float a0 = mu * cellSize, a1 = (mu + 1) * cellSize;
-
-                    s0[d] = plane; s0[u] = a0; s0[1] = yBot;
-                    s1[d] = plane; s1[u] = a1; s1[1] = yBot;
-                    s2[d] = plane; s2[u] = a1; s2[1] = yTop;
-                    s3[d] = plane; s3[u] = a0; s3[1] = yTop;
-
-                    float bright = FaceBrightness[faceIndex];
-                    skirtBright[0] = skirtBright[1] = skirtBright[2] = skirtBright[3] =
-                        emissiveMask[topId] == 1 ? bright + 4f : bright;
-
-                    float su0 = chunkOrigin[u] + a0;
-                    float su1 = chunkOrigin[u] + a1;
-                    float sv0 = chunkOrigin[1] + yBot;
-                    float sv1 = chunkOrigin[1] + yTop;
-                    // Double-sided (two windings): gaps get viewed from either side.
-                    float layer = renderTable[topId * 6 + faceIndex];
-                    solid.Quad(s0, s1, s2, s3, su0, sv0, su1, sv1, layer, skirtBright, flip: false);
-                    solid.Quad(s0, s1, s2, s3, su0, sv0, su1, sv1, layer, skirtBright, flip: true);
                 }
             }
         }

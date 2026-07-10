@@ -137,6 +137,17 @@ distance-scaled sync for physics contraptions.
    water/translucent ranking, determinism); protocol serves section coords.
    Client streams + renders level 1 sections only (16-chunk reach) with
    overdraw blending; the v1 chunk-ring path is deleted.
+
+   **DONE (2026-07-10).** ChunkLod.MipSections (opacity → topmost corner),
+   WorldStore recursive pyramid (lods rows section-keyed per level,
+   ancestors invalidated at cx>>ℓ), client generic per-level section rings
+   (uniform 3..9 request shell in section units, mesh ≤ 8), coverage-based
+   hole-free refinement (section draws while any of its 8 child footprints
+   lacks a Done finer stage; translucent only when zero are Done), skirts
+   and the v1 underlap/band special cases deleted. Verified at spawn:
+   ocean + land vistas seam-free, snow/grass tops survive to the horizon,
+   ~400 draws (v1: ~1300), 60 fps. Known leftover: fog-vs-sky grey
+   silhouettes at the far edge (M6).
 3. **Levels 2–3 + refinement** — full 32→64 chunk reach; hole-free
    hierarchical swap rule; draw/tri budget measured at spawn, mountains,
    ocean; fog/sky horizon match.

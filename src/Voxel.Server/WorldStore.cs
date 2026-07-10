@@ -25,14 +25,15 @@ public sealed class WorldStore : IDisposable
     private readonly string _lockPath;
     private readonly WorldGen _generator;
     private readonly Dictionary<(int, int, int), ChunkData> _cache = new();
-    /// <summary>Deflated LOD blobs by (level, cx, cy, cz); null = all air.</summary>
+    /// <summary>Deflated LOD blobs by (level, sx, sy, sz); null = all air.</summary>
     private readonly Dictionary<(int, int, int, int), byte[]?> _lodCache = new();
-    private readonly ushort _waterId;
+    /// <summary>Registry opacity table (1 = hides faces); ranks blocks during LOD mips.</summary>
+    private readonly byte[] _opaque;
 
     public WorldStore(string filePath, WorldGen generator, BlockRegistry blocks)
     {
         _generator = generator;
-        _waterId = blocks.Resolve("water");
+        _opaque = blocks.Opaque;
         Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
 
         // Single-writer guard: SQLite WAL would let two server processes open
@@ -168,49 +169,85 @@ public sealed class WorldStore : IDisposable
         InvalidateLods(cx, cy, cz);
     }
 
-    // ---- Chunk LOD cache (plan 04) ---------------------------------------------
+    // ---- Section LOD pyramid (plan 04 v2) ----------------------------------------
 
     /// <summary>
-    /// Deflated LOD cell blob for a chunk (null = all air): memory → lods
-    /// table → downsample-from-source-and-persist. Chunks outside the LOD
-    /// vertical band serve empty without touching the generator.
+    /// Deflated 16³-cell blob for a level-ℓ section (null = all air):
+    /// memory → lods table → mip-from-level-below-and-persist. Level 1 mips
+    /// from the 8 source chunks, higher levels from their 8 child sections,
+    /// so a cold level-3 request builds (and caches) its whole subtree.
     /// </summary>
-    public byte[]? LoadLodBlob(int level, int cx, int cy, int cz)
+    public byte[]? LoadLodBlob(int level, int sx, int sy, int sz)
     {
         if (level is < 1 or > ChunkLod.MaxLevel)
         {
-            throw new ArgumentOutOfRangeException(nameof(level), level, "LOD level must be 1 or 2");
+            throw new ArgumentOutOfRangeException(nameof(level), level, $"LOD level must be 1..{ChunkLod.MaxLevel}");
         }
-        if (!ChunkLod.InBand(cy)) return null;
 
-        var key = (level, cx, cy, cz);
+        var key = (level, sx, sy, sz);
         if (_lodCache.TryGetValue(key, out var cached)) return cached;
 
-        byte[]? blob = ReadLodBlob(level, cx, cy, cz);
+        byte[]? blob = ReadLodBlob(level, sx, sy, sz);
         if (blob is null)
         {
-            var cells = ChunkLod.Downsample(Load(cx, cy, cz).Blocks, level, _waterId);
-            blob = cells.All(id => id == 0) ? [] : DeflateBlocks(cells);
-            PersistLod(level, cx, cy, cz, blob);
+            var cells = BuildLodCells(level, sx, sy, sz);
+            blob = cells is null ? [] : DeflateBlocks(cells);
+            PersistLod(level, sx, sy, sz, blob);
         }
         byte[]? result = blob.Length == 0 ? null : blob;
         _lodCache[key] = result;
         return result;
     }
 
-    /// <summary>Drops a source chunk's cached LOD blobs; they rebuild lazily on next request.</summary>
+    private ushort[]? BuildLodCells(int level, int sx, int sy, int sz)
+    {
+        var children = new ushort[]?[8];
+        for (int dy = 0; dy < 2; dy++)
+        for (int dz = 0; dz < 2; dz++)
+        for (int dx = 0; dx < 2; dx++)
+        {
+            int cx = sx * 2 + dx, cy = sy * 2 + dy, cz = sz * 2 + dz;
+            if (level == 1)
+            {
+                var chunk = Load(cx, cy, cz);
+                children[ChunkLod.ChildIndex(dx, dy, dz)] = chunk.CountSolid() == 0 ? null : chunk.Blocks;
+            }
+            else
+            {
+                byte[]? childBlob = LoadLodBlob(level - 1, cx, cy, cz);
+                children[ChunkLod.ChildIndex(dx, dy, dz)] = childBlob is null ? null : InflateCells(childBlob);
+            }
+        }
+        return ChunkLod.MipSections(children, _opaque);
+    }
+
+    private static ushort[] InflateCells(byte[] blob)
+    {
+        byte[] raw = InflateRaw(blob);
+        if (raw.Length != Constants.ChunkVolume * 2)
+        {
+            throw new InvalidDataException($"LOD blob: bad stored size {raw.Length}");
+        }
+        var cells = new ushort[Constants.ChunkVolume];
+        Buffer.BlockCopy(raw, 0, cells, 0, raw.Length);
+        return cells;
+    }
+
+    /// <summary>Drops the edited chunk's LOD ancestors (one section per level); they rebuild lazily.</summary>
     private void InvalidateLods(int cx, int cy, int cz)
     {
         for (int level = 1; level <= ChunkLod.MaxLevel; level++)
         {
-            _lodCache.Remove((level, cx, cy, cz));
+            int sx = cx >> level, sy = cy >> level, sz = cz >> level;
+            _lodCache.Remove((level, sx, sy, sz));
+            using var cmd = _db.CreateCommand();
+            cmd.CommandText = "DELETE FROM lods WHERE level = $level AND cx = $sx AND cy = $sy AND cz = $sz";
+            cmd.Parameters.AddWithValue("$level", level);
+            cmd.Parameters.AddWithValue("$sx", sx);
+            cmd.Parameters.AddWithValue("$sy", sy);
+            cmd.Parameters.AddWithValue("$sz", sz);
+            cmd.ExecuteNonQuery();
         }
-        using var cmd = _db.CreateCommand();
-        cmd.CommandText = "DELETE FROM lods WHERE cx = $cx AND cy = $cy AND cz = $cz";
-        cmd.Parameters.AddWithValue("$cx", cx);
-        cmd.Parameters.AddWithValue("$cy", cy);
-        cmd.Parameters.AddWithValue("$cz", cz);
-        cmd.ExecuteNonQuery();
     }
 
     private void PersistLod(int level, int cx, int cy, int cz, byte[] blob)

@@ -164,13 +164,13 @@ public sealed class Connection : IDisposable
                 ushort[]? blocks = null;
                 if (!header.Empty)
                 {
-                    int cellCount = ChunkLod.CellCount(header.LodLevel);
+                    // Chunks and LOD sections share the 16³ u16 shape (plan 04 v2).
                     byte[] raw = InflateRaw(header.Payload.Span);
-                    if (raw.Length != cellCount * 2)
+                    if (raw.Length != Constants.ChunkVolume * 2)
                     {
                         throw new InvalidDataException($"chunk {header.Cx},{header.Cy},{header.Cz} lod{header.LodLevel}: bad payload size {raw.Length}");
                     }
-                    blocks = new ushort[cellCount];
+                    blocks = new ushort[Constants.ChunkVolume];
                     Buffer.BlockCopy(raw, 0, blocks, 0, raw.Length);
                 }
                 Events.Enqueue(new ServerEvent.Chunk(header.Cx, header.Cy, header.Cz, header.LodLevel, blocks));

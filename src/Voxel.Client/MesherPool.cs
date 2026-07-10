@@ -12,7 +12,7 @@ namespace Voxel.Client;
 /// </summary>
 public sealed class MesherPool : IDisposable
 {
-    /// <param name="Level">LOD level (plan 04): 0 = full 16³ chunk, 1 = 8³ cells of 2, 2 = 4³ of 4.</param>
+    /// <param name="Level">LOD level (plan 04 v2): every level is a 16³ grid; cells are 2^level blocks.</param>
     public readonly record struct Job(
         (int Cx, int Cy, int Cz) Key,
         long Version,
@@ -72,10 +72,12 @@ public sealed class MesherPool : IDisposable
                     if (!reader.WaitToReadAsync(_cts.Token).AsTask().GetAwaiter().GetResult()) return;
                     continue;
                 }
+                // Section origin in chunk units = section coords << level (16³ grid at every level).
                 var result = GreedyMesher.Mesh(
-                    job.Key.Cx, job.Key.Cy, job.Key.Cz, job.Blocks, job.Neighbors,
+                    job.Key.Cx << job.Level, job.Key.Cy << job.Level, job.Key.Cz << job.Level,
+                    job.Blocks, job.Neighbors,
                     opaque, renderTable, translucentMask, flatAoMask, emissiveMask,
-                    Voxel.Shared.ChunkLod.CellsPerAxis(job.Level), 1 << job.Level, skirts: job.Level > 0);
+                    Voxel.Shared.Constants.ChunkSize, 1 << job.Level);
                 _results.Enqueue(new Completed(job, result));
                 Interlocked.Decrement(ref _pending);
             }

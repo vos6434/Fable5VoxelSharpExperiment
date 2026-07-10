@@ -13,20 +13,36 @@ namespace Voxel.Client;
 /// version and re-queue meshing; border edits also remesh the touching
 /// neighbor; stale mesh results are dropped by version comparison.
 ///
-/// LOD1 ring (plan 04 M2): beyond the full-detail sphere a second ring of
-/// server-downsampled 8³ chunks streams to Lod1RenderRadius, band-limited to
-/// ChunkLod's vertical band, requested only on leftover budget (LOD0 keeps
-/// absolute priority). A LOD1 mesh renders only while the chunk has no
-/// full-detail mesh, so ring transitions swap without holes.
+/// LOD sections (plan 04 v2, Voxy/DH model): level ℓ ≥ 1 streams cubic
+/// 16³-cell sections covering 2^ℓ chunks per axis. In its own units every
+/// level runs the same ring: sections requested for distance 3..9, meshed
+/// to 8, so level ℓ reaches 8·2^ℓ chunks and overlaps the finer level by
+/// 25%. A section renders while any of its 8 child footprints lacks a
+/// finished finer mesh — coarse fills streaming gaps and the boundary
+/// beyond fine coverage, and hides automatically once children are ready
+/// (hole-free refinement, no stitching).
 /// </summary>
 public sealed class StreamingWorld : IDisposable
 {
-    public const int RenderRadius = 8;                   // LOD0, full detail (plan 04: up from 6)
+    public const int RenderRadius = 8;                   // LOD0, full detail
     private const int DataRadius = RenderRadius + 1;
     private const int UnloadRadius = DataRadius + 2;
-    public const int Lod1RenderRadius = 16;
-    private const int Lod1DataRadius = Lod1RenderRadius + 1;
-    private const int Lod1UnloadRadius = Lod1DataRadius + 2;
+
+    /// <summary>Coarsest level the client streams/renders (plan 04 v2 M2: level 1; M3 raises it).</summary>
+    public const int RenderLodLevels = 1;
+
+    /// <summary>Chunk reach of the coarsest LOD ring (drives fog placement).</summary>
+    public const int LodReachChunks = RenderRadius << RenderLodLevels;
+
+    // LOD rings in section units, identical for every level: request the
+    // shell 3..9, mesh/render to 8. The inner hole overlaps the finer level
+    // (25% overdraw margin); +1 data shell feeds neighbor face culling.
+    private const int LodInnerRadius = 3;
+    private const int LodRenderRadius = 8;
+    private const int LodDataRadius = LodRenderRadius + 1;
+    private const int LodUnloadOuter = LodDataRadius + 2;
+    private const int LodUnloadInner = LodInnerRadius - 1;
+
     private const int MaxOutstandingRequests = 96;
     private const int RequestBatch = 32;
     private const int MaxPendingMeshJobs = 24;
@@ -48,8 +64,8 @@ public sealed class StreamingWorld : IDisposable
 
     private sealed class LodEntry
     {
-        public required int Cx, Cy, Cz;
-        public ushort[]? Cells;   // 8³ LOD1 cells; null = all air
+        public required int Sx, Sy, Sz;
+        public ushort[]? Cells;   // 16³ cells; null = all air
         public MeshState State;
         public long MeshVersion;
         public ChunkMesh? Solid;
@@ -63,29 +79,20 @@ public sealed class StreamingWorld : IDisposable
 
     private static readonly (int Dx, int Dy, int Dz, int DistSq)[] DataOffsets = SphereOffsets(DataRadius);
     private static readonly (int Dx, int Dy, int Dz, int DistSq)[] RenderOffsets = SphereOffsets(RenderRadius);
-    /// <summary>
-    /// Inside this distance a LOD1 mesh renders even under a full-detail mesh
-    /// (depth-biased behind it). At the ring boundary the fine mesh's step
-    /// faces were culled against full-detail neighbor data that isn't what
-    /// actually renders next to it — the coarse copy underneath seals those
-    /// see-through cracks.
-    /// </summary>
-    private const int Lod1UnderlapRadius = RenderRadius + 2;
-
-    /// <summary>LOD1 shell: one chunk inside the full-detail boundary (underlap) out to its data radius.</summary>
-    private static readonly (int Dx, int Dy, int Dz, int DistSq)[] Lod1Offsets =
-        [.. SphereOffsets(Lod1DataRadius).Where(o => o.Item4 >= (RenderRadius - 1) * (RenderRadius - 1))];
+    /// <summary>LOD shell offsets (any level): the 3..9 section ring, nearest-first.</summary>
+    private static readonly (int Dx, int Dy, int Dz, int DistSq)[] LodOffsets =
+        [.. SphereOffsets(LodDataRadius).Where(o => o.Item4 >= LodInnerRadius * LodInnerRadius)];
 
     private readonly GL _gl;
     private readonly Connection _connection;
     private readonly MesherPool _pool;
-    private readonly ushort _waterId;
     private readonly Dictionary<(int, int, int), Entry> _chunks = new();
-    private readonly Dictionary<(int, int, int), LodEntry> _lod1 = new();
     private readonly HashSet<(int, int, int)> _requested = new();
-    private readonly HashSet<(int, int, int)> _lod1Requested = new();
+    // Index 1..RenderLodLevels (slot 0 unused) — one section map per level.
+    private readonly Dictionary<(int, int, int), LodEntry>[] _lod;
+    private readonly HashSet<(int, int, int)>[] _lodRequested;
+    private readonly int[] _lodCursor;
     private int _requestCursor;
-    private int _lod1RequestCursor;
     private (int X, int Y, int Z) _center = (int.MinValue, 0, 0);
 
     public string? DisconnectReason { get; private set; }
@@ -94,11 +101,20 @@ public sealed class StreamingWorld : IDisposable
     {
         _gl = gl;
         _connection = connection;
-        _waterId = data.Blocks.Resolve("water");
         _pool = new MesherPool(data.Blocks.Opaque, data.RenderTable, data.TranslucentMask, data.FlatAoMask, data.EmissiveMask);
+        _lod = new Dictionary<(int, int, int), LodEntry>[RenderLodLevels + 1];
+        _lodRequested = new HashSet<(int, int, int)>[RenderLodLevels + 1];
+        _lodCursor = new int[RenderLodLevels + 1];
+        for (int level = 1; level <= RenderLodLevels; level++)
+        {
+            _lod[level] = new Dictionary<(int, int, int), LodEntry>();
+            _lodRequested[level] = new HashSet<(int, int, int)>();
+        }
     }
 
-    public (int Loaded, int Rendered, int Lod1Loaded, int Lod1Rendered, int PendingMesh, int AwaitingNet, int Workers) Stats
+    private (int X, int Y, int Z) LodCenter(int level) => (_center.X >> level, _center.Y >> level, _center.Z >> level);
+
+    public (int Loaded, int Rendered, int LodLoaded, int LodRendered, int PendingMesh, int AwaitingNet, int Workers) Stats
     {
         get
         {
@@ -107,13 +123,17 @@ public sealed class StreamingWorld : IDisposable
             {
                 if (e.State == MeshState.Done && (e.Solid is not null || e.LiquidSurface is not null || e.Translucent is not null)) rendered++;
             }
-            int lodRendered = 0;
-            foreach (var e in _lod1.Values)
+            int lodLoaded = 0, lodRendered = 0, awaiting = _requested.Count;
+            for (int level = 1; level <= RenderLodLevels; level++)
             {
-                if (e.Solid is not null || e.LiquidSurface is not null || e.Translucent is not null) lodRendered++;
+                lodLoaded += _lod[level].Count;
+                awaiting += _lodRequested[level].Count;
+                foreach (var e in _lod[level].Values)
+                {
+                    if (e.Solid is not null || e.LiquidSurface is not null || e.Translucent is not null) lodRendered++;
+                }
             }
-            return (_chunks.Count, rendered, _lod1.Count, lodRendered, _pool.Pending,
-                _requested.Count + _lod1Requested.Count, _pool.WorkerCount);
+            return (_chunks.Count, rendered, lodLoaded, lodRendered, _pool.Pending, awaiting, _pool.WorkerCount);
         }
     }
 
@@ -153,7 +173,7 @@ public sealed class StreamingWorld : IDisposable
         {
             _center = center;
             _requestCursor = 0;
-            _lod1RequestCursor = 0;
+            for (int level = 1; level <= RenderLodLevels; level++) _lodCursor[level] = 0;
             UnloadFar();
         }
 
@@ -205,50 +225,60 @@ public sealed class StreamingWorld : IDisposable
         }
     }
 
-    /// <summary>A LOD1 mesh yields while its chunk shows no full-detail mesh (transition without holes).</summary>
-    private bool Lod1Visible(LodEntry e) =>
-        !(_chunks.TryGetValue((e.Cx, e.Cy, e.Cz), out var full) && full.State == MeshState.Done);
+    /// <summary>
+    /// How many of a section's 8 child footprints have a finished finer
+    /// stage (meshed or known-empty): level-1 children are chunks, higher
+    /// levels' children are the sections one level below. Coverage is
+    /// transitive — a Done child that is itself hidden by its own children
+    /// still covers its footprint.
+    /// </summary>
+    private int CoveredChildren(int level, int sx, int sy, int sz)
+    {
+        int done = 0;
+        for (int dy = 0; dy < 2; dy++)
+        for (int dz = 0; dz < 2; dz++)
+        for (int dx = 0; dx < 2; dx++)
+        {
+            var childKey = (sx * 2 + dx, sy * 2 + dy, sz * 2 + dz);
+            if (level == 1)
+            {
+                if (_chunks.TryGetValue(childKey, out var chunk) && chunk.State == MeshState.Done) done++;
+            }
+            else if (_lod[level - 1].TryGetValue(childKey, out var child) && child.State == MeshState.Done)
+            {
+                done++;
+            }
+        }
+        return done;
+    }
+
+    /// <summary>Depth-writing passes: a section draws while any child footprint is uncovered.</summary>
+    public IEnumerable<(int Sx, int Sy, int Sz, ChunkMesh Mesh)> LodSolidMeshes(int level)
+    {
+        foreach (var e in _lod[level].Values)
+        {
+            if (e.Solid is not null && CoveredChildren(level, e.Sx, e.Sy, e.Sz) < 8) yield return (e.Sx, e.Sy, e.Sz, e.Solid);
+        }
+    }
+
+    public IEnumerable<(int Sx, int Sy, int Sz, ChunkMesh Mesh)> LodLiquidSurfaceMeshes(int level)
+    {
+        foreach (var e in _lod[level].Values)
+        {
+            if (e.LiquidSurface is not null && CoveredChildren(level, e.Sx, e.Sy, e.Sz) < 8) yield return (e.Sx, e.Sy, e.Sz, e.LiquidSurface);
+        }
+    }
 
     /// <summary>
-    /// Depth-writing passes (solid, liquid surface) additionally render inside
-    /// the underlap shell even under a full-detail mesh — the coarse copy is
-    /// depth-biased behind, so it only shows through boundary cracks and seals
-    /// them. The translucent pass must not: it has no depth writes, so a
-    /// second layer would double-blend into a visibly lighter band.
+    /// The translucent pass has no depth writes, so overlapping levels would
+    /// double-blend: a section's translucency draws only where nothing finer
+    /// is finished at all.
     /// </summary>
-    private bool Lod1UnderlapVisible(LodEntry e)
+    public IEnumerable<(int Sx, int Sy, int Sz, ChunkMesh Mesh)> LodTranslucentMeshes(int level)
     {
-        int dx = e.Cx - _center.X, dy = e.Cy - _center.Y, dz = e.Cz - _center.Z;
-        int distSq = dx * dx + dy * dy + dz * dz;
-        if (distSq >= (RenderRadius - 1) * (RenderRadius - 1) &&
-            distSq <= Lod1UnderlapRadius * Lod1UnderlapRadius)
+        foreach (var e in _lod[level].Values)
         {
-            return true;
-        }
-        return Lod1Visible(e);
-    }
-
-    public IEnumerable<(int Cx, int Cy, int Cz, ChunkMesh Mesh)> Lod1SolidMeshes()
-    {
-        foreach (var e in _lod1.Values)
-        {
-            if (e.Solid is not null && Lod1UnderlapVisible(e)) yield return (e.Cx, e.Cy, e.Cz, e.Solid);
-        }
-    }
-
-    public IEnumerable<(int Cx, int Cy, int Cz, ChunkMesh Mesh)> Lod1LiquidSurfaceMeshes()
-    {
-        foreach (var e in _lod1.Values)
-        {
-            if (e.LiquidSurface is not null && Lod1UnderlapVisible(e)) yield return (e.Cx, e.Cy, e.Cz, e.LiquidSurface);
-        }
-    }
-
-    public IEnumerable<(int Cx, int Cy, int Cz, ChunkMesh Mesh)> Lod1TranslucentMeshes()
-    {
-        foreach (var e in _lod1.Values)
-        {
-            if (e.Translucent is not null && Lod1Visible(e)) yield return (e.Cx, e.Cy, e.Cz, e.Translucent);
+            if (e.Translucent is not null && CoveredChildren(level, e.Sx, e.Sy, e.Sz) == 0) yield return (e.Sx, e.Sy, e.Sz, e.Translucent);
         }
     }
 
@@ -294,27 +324,30 @@ public sealed class StreamingWorld : IDisposable
     private void OnChunk(ServerEvent.Chunk chunk)
     {
         var key = (chunk.Cx, chunk.Cy, chunk.Cz);
-        int dx = chunk.Cx - _center.X, dy = chunk.Cy - _center.Y, dz = chunk.Cz - _center.Z;
-        int distSq = dx * dx + dy * dy + dz * dz;
 
-        if (chunk.LodLevel == 1)
+        if (chunk.LodLevel >= 1)
         {
-            _lod1Requested.Remove(key);
-            if (_lod1.ContainsKey(key)) return;
-            if (distSq > Lod1UnloadRadius * Lod1UnloadRadius) return; // moved away meanwhile
-            _lod1[key] = new LodEntry
+            if (chunk.LodLevel > RenderLodLevels) return;
+            var lod = _lod[chunk.LodLevel];
+            _lodRequested[chunk.LodLevel].Remove(key);
+            if (lod.ContainsKey(key)) return;
+            var (scx, scy, scz) = LodCenter(chunk.LodLevel);
+            int sdx = chunk.Cx - scx, sdy = chunk.Cy - scy, sdz = chunk.Cz - scz;
+            if (sdx * sdx + sdy * sdy + sdz * sdz > LodUnloadOuter * LodUnloadOuter) return; // moved away meanwhile
+            lod[key] = new LodEntry
             {
-                Cx = chunk.Cx, Cy = chunk.Cy, Cz = chunk.Cz,
+                Sx = chunk.Cx, Sy = chunk.Cy, Sz = chunk.Cz,
                 Cells = chunk.Blocks,
                 State = chunk.Blocks is null ? MeshState.Done : MeshState.None,
             };
             return;
         }
-        if (chunk.LodLevel != 0) return;
 
         _requested.Remove(key);
         if (_chunks.ContainsKey(key)) return;
-        if (distSq > UnloadRadius * UnloadRadius) return; // moved away meanwhile
+
+        int dx = chunk.Cx - _center.X, dy = chunk.Cy - _center.Y, dz = chunk.Cz - _center.Z;
+        if (dx * dx + dy * dy + dz * dz > UnloadRadius * UnloadRadius) return; // moved away meanwhile
 
         bool empty = chunk.Blocks is null;
         _chunks[key] = new Entry
@@ -328,9 +361,16 @@ public sealed class StreamingWorld : IDisposable
 
     private void RequestSome()
     {
+        int inFlight()
+        {
+            int n = _requested.Count;
+            for (int level = 1; level <= RenderLodLevels; level++) n += _lodRequested[level].Count;
+            return n;
+        }
+
         List<(int, int, int)>? batch = null;
         while (_requestCursor < DataOffsets.Length &&
-               _requested.Count + _lod1Requested.Count < MaxOutstandingRequests &&
+               inFlight() < MaxOutstandingRequests &&
                (batch?.Count ?? 0) < RequestBatch)
         {
             var (dx, dy, dz, _) = DataOffsets[_requestCursor];
@@ -342,24 +382,31 @@ public sealed class StreamingWorld : IDisposable
         }
         if (batch is not null) _connection.RequestChunks(0, batch);
 
-        // LOD1 streams only on leftover budget: never before the full-detail
-        // sphere has been fully requested, never past the shared in-flight cap.
+        // LOD levels stream fine-to-coarse on leftover budget only: never
+        // before every finer cursor is exhausted, never past the shared cap.
         if (_requestCursor < DataOffsets.Length || batch is not null) return;
-        List<(int, int, int)>? lodBatch = null;
-        while (_lod1RequestCursor < Lod1Offsets.Length &&
-               _requested.Count + _lod1Requested.Count < MaxOutstandingRequests &&
-               (lodBatch?.Count ?? 0) < RequestBatch)
+        for (int level = 1; level <= RenderLodLevels; level++)
         {
-            var (dx, dy, dz, _) = Lod1Offsets[_lod1RequestCursor];
-            _lod1RequestCursor++;
-            int cy = _center.Y + dy;
-            if (!ChunkLod.InBand(cy)) continue; // distant hell/deep stone is invisible anyway
-            var key = (_center.X + dx, cy, _center.Z + dz);
-            if (_lod1.ContainsKey(key) || _lod1Requested.Contains(key)) continue;
-            _lod1Requested.Add(key);
-            (lodBatch ??= new List<(int, int, int)>()).Add(key);
+            var (scx, scy, scz) = LodCenter(level);
+            List<(int, int, int)>? lodBatch = null;
+            while (_lodCursor[level] < LodOffsets.Length &&
+                   inFlight() < MaxOutstandingRequests &&
+                   (lodBatch?.Count ?? 0) < RequestBatch)
+            {
+                var (dx, dy, dz, _) = LodOffsets[_lodCursor[level]];
+                _lodCursor[level]++;
+                var key = (scx + dx, scy + dy, scz + dz);
+                if (_lod[level].ContainsKey(key) || _lodRequested[level].Contains(key)) continue;
+                _lodRequested[level].Add(key);
+                (lodBatch ??= new List<(int, int, int)>()).Add(key);
+            }
+            if (lodBatch is not null)
+            {
+                _connection.RequestChunks((byte)level, lodBatch);
+                return; // this level consumed the budget; coarser levels wait
+            }
+            if (_lodCursor[level] < LodOffsets.Length) return; // capped out mid-level
         }
-        if (lodBatch is not null) _connection.RequestChunks(1, lodBatch);
     }
 
     private void ScheduleMeshes()
@@ -390,37 +437,36 @@ public sealed class StreamingWorld : IDisposable
             for (int i = 0; i < 6; i++) neighbors[i] = (ushort[]?)neighbors[i]?.Clone();
             _pool.Submit(new MesherPool.Job(key, entry.MeshVersion, blocksCopy, neighbors));
         }
-        ScheduleLod1Meshes();
+
+        for (int level = 1; level <= RenderLodLevels; level++) ScheduleLodMeshes(level);
     }
 
-    private void ScheduleLod1Meshes()
+    private void ScheduleLodMeshes(int level)
     {
-        foreach (var (dx, dy, dz, distSq) in Lod1Offsets)
+        var (scx, scy, scz) = LodCenter(level);
+        foreach (var (dx, dy, dz, distSq) in LodOffsets)
         {
-            if (distSq > Lod1RenderRadius * Lod1RenderRadius) break; // sorted; the rest is data-only shell
+            if (distSq > LodRenderRadius * LodRenderRadius) break; // sorted; the rest is data-only shell
             if (_pool.Pending >= MaxPendingMeshJobs) break;
-            var key = (_center.X + dx, _center.Y + dy, _center.Z + dz);
-            if (!_lod1.TryGetValue(key, out var entry) || entry.State != MeshState.None || entry.Cells is null) continue;
+            var key = (scx + dx, scy + dy, scz + dz);
+            if (!_lod[level].TryGetValue(key, out var entry) || entry.State != MeshState.None || entry.Cells is null) continue;
 
             var neighbors = new ushort[]?[6];
             bool ready = true;
             for (int i = 0; i < 6; i++)
             {
                 var (nx, ny, nz) = NeighborOffsets[i];
-                var nkey = (entry.Cx + nx, entry.Cy + ny, entry.Cz + nz);
-                if (!ChunkLod.InBand(nkey.Item2)) continue; // outside the band = air, never requested
-                if (_lod1.TryGetValue(nkey, out var ln))
+                var nkey = (entry.Sx + nx, entry.Sy + ny, entry.Sz + nz);
+                if (_lod[level].TryGetValue(nkey, out var n))
                 {
-                    neighbors[i] = ln.Cells is null ? null : (ushort[])ln.Cells.Clone();
+                    neighbors[i] = n.Cells is null ? null : (ushort[])n.Cells.Clone();
+                    continue;
                 }
-                else if (_chunks.TryGetValue(nkey, out var full))
-                {
-                    // Inner boundary: derive the coarse neighbor from full-detail
-                    // data with the same downsampler the server uses, so
-                    // cross-ring face culling is consistent.
-                    neighbors[i] = full.Empty ? null : ChunkLod.Downsample(full.Data.Blocks, 1, _waterId);
-                }
-                else
+                // Inside the ring's inner hole nothing is ever requested:
+                // stable air (the walls this bakes sit in the overlap region,
+                // depth-covered by finer terrain). Anywhere else: wait.
+                int ndx = dx + nx, ndy = dy + ny, ndz = dz + nz;
+                if (ndx * ndx + ndy * ndy + ndz * ndz >= LodInnerRadius * LodInnerRadius)
                 {
                     ready = false;
                     break;
@@ -429,15 +475,15 @@ public sealed class StreamingWorld : IDisposable
             if (!ready) continue;
 
             entry.State = MeshState.Pending;
-            _pool.Submit(new MesherPool.Job(key, entry.MeshVersion, (ushort[])entry.Cells.Clone(), neighbors, Level: 1));
+            _pool.Submit(new MesherPool.Job(key, entry.MeshVersion, (ushort[])entry.Cells.Clone(), neighbors, (byte)level));
         }
     }
 
     private void ApplyMeshResult(MesherPool.Completed completed)
     {
-        if (completed.Job.Level == 1)
+        if (completed.Job.Level >= 1)
         {
-            if (!_lod1.TryGetValue(completed.Job.Key, out var lodEntry)) return; // unloaded meanwhile
+            if (!_lod[completed.Job.Level].TryGetValue(completed.Job.Key, out var lodEntry)) return; // unloaded meanwhile
             if (lodEntry.MeshVersion != completed.Job.Version) return;
             UploadMeshes(completed.Result, ref lodEntry.Solid, ref lodEntry.LiquidSurface, ref lodEntry.Translucent);
             lodEntry.State = MeshState.Done;
@@ -479,27 +525,29 @@ public sealed class StreamingWorld : IDisposable
             foreach (var key in toRemove) _chunks.Remove(key);
         }
 
-        // LOD1 sheds both ways: past the outer hysteresis ring, and deep inside
-        // the full-detail sphere where the player has moved (entries are only
-        // requested from RenderRadius−1 outward; 2 chunks of inner hysteresis).
-        int lodInnerUnload = (RenderRadius - 3) * (RenderRadius - 3);
-        List<(int, int, int)>? lodRemove = null;
-        foreach (var (key, entry) in _lod1)
+        // LOD sections shed both outward and inward (the ring follows the
+        // player; stale sections deep inside the finer region are waste).
+        for (int level = 1; level <= RenderLodLevels; level++)
         {
-            int dx = entry.Cx - _center.X;
-            int dy = entry.Cy - _center.Y;
-            int dz = entry.Cz - _center.Z;
-            int distSq = dx * dx + dy * dy + dz * dz;
-            if (distSq <= Lod1UnloadRadius * Lod1UnloadRadius && distSq >= lodInnerUnload) continue;
-            entry.Solid?.Dispose();
-            entry.LiquidSurface?.Dispose();
-            entry.Translucent?.Dispose();
-            entry.MeshVersion++;
-            (lodRemove ??= new List<(int, int, int)>()).Add(key);
-        }
-        if (lodRemove is not null)
-        {
-            foreach (var key in lodRemove) _lod1.Remove(key);
+            var (scx, scy, scz) = LodCenter(level);
+            List<(int, int, int)>? lodRemove = null;
+            foreach (var (key, entry) in _lod[level])
+            {
+                int dx = entry.Sx - scx;
+                int dy = entry.Sy - scy;
+                int dz = entry.Sz - scz;
+                int distSq = dx * dx + dy * dy + dz * dz;
+                if (distSq <= LodUnloadOuter * LodUnloadOuter && distSq >= LodUnloadInner * LodUnloadInner) continue;
+                entry.Solid?.Dispose();
+                entry.LiquidSurface?.Dispose();
+                entry.Translucent?.Dispose();
+                entry.MeshVersion++;
+                (lodRemove ??= new List<(int, int, int)>()).Add(key);
+            }
+            if (lodRemove is not null)
+            {
+                foreach (var key in lodRemove) _lod[level].Remove(key);
+            }
         }
     }
 
@@ -529,11 +577,14 @@ public sealed class StreamingWorld : IDisposable
             entry.LiquidSurface?.Dispose();
             entry.Translucent?.Dispose();
         }
-        foreach (var entry in _lod1.Values)
+        for (int level = 1; level <= RenderLodLevels; level++)
         {
-            entry.Solid?.Dispose();
-            entry.LiquidSurface?.Dispose();
-            entry.Translucent?.Dispose();
+            foreach (var entry in _lod[level].Values)
+            {
+                entry.Solid?.Dispose();
+                entry.LiquidSurface?.Dispose();
+                entry.Translucent?.Dispose();
+            }
         }
         _pool.Dispose();
     }

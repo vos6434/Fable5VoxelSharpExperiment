@@ -40,7 +40,7 @@ public sealed class Game
 {
     // Fog completes one chunk inside the LOD1 ring's edge (plan 04 M2) so the
     // hard slice at the render sphere boundary sits past full fog.
-    private const float FogFar = (StreamingWorld.Lod1RenderRadius - 1) * Constants.ChunkSize;
+    private const float FogFar = (StreamingWorld.LodReachChunks - 1) * Constants.ChunkSize;
     private const float FogNear = FogFar - 4 * Constants.ChunkSize;
 
     private static readonly (float R, float G, float B) SurfaceSky = (0x87 / 255f, 0xCE / 255f, 0xEB / 255f);
@@ -762,6 +762,16 @@ public sealed class Game
             _frustumPlanes,
             cx * Constants.ChunkSize + 8, cy * Constants.ChunkSize + 8, cz * Constants.ChunkSize + 8,
             chunkRadius);
+        // LOD sections cover 2^level chunks per axis (plan 04 v2).
+        bool SectionVisible(int sx, int sy, int sz, int level)
+        {
+            int size = Constants.ChunkSize << level;
+            float half = size * 0.5f;
+            return Frustum.SphereVisible(
+                _frustumPlanes,
+                sx * size + half, sy * size + half, sz * size + half,
+                chunkRadius * (1 << level));
+        }
 
         // Solid pass: opaque + alpha-tested cutout, backface culled.
         _shader.SetFloat("uAlphaTest", 0.5f);
@@ -778,17 +788,22 @@ public sealed class Game
             draws++;
         }
 
-        // LOD1 ring (plan 04 M2): coarse solids with a slight depth bias so
-        // full-detail geometry always wins the depth test at ring seams.
+        // LOD section rings (plan 04 v2): coarse solids draw fine-to-coarse
+        // with growing depth bias, so finer geometry always wins where levels
+        // overlap and coarse only shows through gaps in finer coverage.
         _gl.Enable(EnableCap.PolygonOffsetFill);
-        _gl.PolygonOffset(2f, 2f);
-        foreach (var (cx, cy, cz, mesh) in _world.Lod1SolidMeshes())
+        for (int level = 1; level <= StreamingWorld.RenderLodLevels; level++)
         {
-            if (!ChunkVisible(cx, cy, cz)) continue;
-            _shader.SetVec3("uChunkOrigin", cx * Constants.ChunkSize, cy * Constants.ChunkSize, cz * Constants.ChunkSize);
-            mesh.Draw();
-            triangles += mesh.IndexCount / 3;
-            draws++;
+            _gl.PolygonOffset(2f * level, 2f * level);
+            int sectionSize = Constants.ChunkSize << level;
+            foreach (var (sx, sy, sz, mesh) in _world.LodSolidMeshes(level))
+            {
+                if (!SectionVisible(sx, sy, sz, level)) continue;
+                _shader.SetVec3("uChunkOrigin", sx * sectionSize, sy * sectionSize, sz * sectionSize);
+                mesh.Draw();
+                triangles += mesh.IndexCount / 3;
+                draws++;
+            }
         }
         _gl.Disable(EnableCap.PolygonOffsetFill);
 
@@ -821,14 +836,18 @@ public sealed class Game
             draws++;
         }
         _gl.Enable(EnableCap.PolygonOffsetFill);
-        _gl.PolygonOffset(2f, 2f);
-        foreach (var (cx, cy, cz, mesh) in _world.Lod1LiquidSurfaceMeshes())
+        for (int level = 1; level <= StreamingWorld.RenderLodLevels; level++)
         {
-            if (!ChunkVisible(cx, cy, cz)) continue;
-            _shader.SetVec3("uChunkOrigin", cx * Constants.ChunkSize, cy * Constants.ChunkSize, cz * Constants.ChunkSize);
-            mesh.Draw();
-            triangles += mesh.IndexCount / 3;
-            draws++;
+            _gl.PolygonOffset(2f * level, 2f * level);
+            int sectionSize = Constants.ChunkSize << level;
+            foreach (var (sx, sy, sz, mesh) in _world.LodLiquidSurfaceMeshes(level))
+            {
+                if (!SectionVisible(sx, sy, sz, level)) continue;
+                _shader.SetVec3("uChunkOrigin", sx * sectionSize, sy * sectionSize, sz * sectionSize);
+                mesh.Draw();
+                triangles += mesh.IndexCount / 3;
+                draws++;
+            }
         }
         _gl.Disable(EnableCap.PolygonOffsetFill);
 
@@ -842,13 +861,17 @@ public sealed class Game
             triangles += mesh.IndexCount / 3;
             draws++;
         }
-        foreach (var (cx, cy, cz, mesh) in _world.Lod1TranslucentMeshes())
+        for (int level = 1; level <= StreamingWorld.RenderLodLevels; level++)
         {
-            if (!ChunkVisible(cx, cy, cz)) continue;
-            _shader.SetVec3("uChunkOrigin", cx * Constants.ChunkSize, cy * Constants.ChunkSize, cz * Constants.ChunkSize);
-            mesh.Draw();
-            triangles += mesh.IndexCount / 3;
-            draws++;
+            int sectionSize = Constants.ChunkSize << level;
+            foreach (var (sx, sy, sz, mesh) in _world.LodTranslucentMeshes(level))
+            {
+                if (!SectionVisible(sx, sy, sz, level)) continue;
+                _shader.SetVec3("uChunkOrigin", sx * sectionSize, sy * sectionSize, sz * sectionSize);
+                mesh.Draw();
+                triangles += mesh.IndexCount / 3;
+                draws++;
+            }
         }
         _gl.DepthMask(true);
         _gl.Disable(EnableCap.Blend);
@@ -934,8 +957,8 @@ public sealed class Game
             $"fps {_lastFps}  draws {draws}  tris {triangles}",
             $"online as {_playerName} (#{_connection.PlayerId})  players {_players.Count + 1}  |  {_clock.Describe()}",
             $"pos {_camera.X:F1} {_camera.Y:F1} {_camera.Z:F1}  biome {_generator.BiomeAt(_camera.X, _camera.Y, _camera.Z)}",
-            $"chunks {stats.Loaded} loaded, {stats.Rendered} rendered  lod1 {stats.Lod1Loaded}/{stats.Lod1Rendered}  net {stats.AwaitingNet}  mesh {stats.PendingMesh} ({stats.Workers} workers)  entities {_entities.Count}",
-            $"hand {(held is null ? "empty" : _inventory.DisplayNameOf(held.Id))}  |  render distance {StreamingWorld.RenderRadius}+{StreamingWorld.Lod1RenderRadius}",
+            $"chunks {stats.Loaded} loaded, {stats.Rendered} rendered  lod {stats.LodLoaded}/{stats.LodRendered}  net {stats.AwaitingNet}  mesh {stats.PendingMesh} ({stats.Workers} workers)  entities {_entities.Count}",
+            $"hand {(held is null ? "empty" : _inventory.DisplayNameOf(held.Id))}  |  render distance {StreamingWorld.RenderRadius}+{StreamingWorld.LodReachChunks}",
             $"gpu  sky {_timerSky.Milliseconds:F2}ms  world {_timerWorld.Milliseconds:F2}ms  ui {_timerUi.Milliseconds:F2}ms",
         ];
         for (int i = 0; i < hudLines.Length; i++)
@@ -987,7 +1010,7 @@ public sealed class Game
         {
             var s = _world.Stats;
             Console.WriteLine(
-                $"[client] at screenshot: {s.Loaded} loaded, {s.Rendered} rendered, lod1 {s.Lod1Loaded}/{s.Lod1Rendered}, " +
+                $"[client] at screenshot: {s.Loaded} loaded, {s.Rendered} rendered, lod {s.LodLoaded}/{s.LodRendered}, " +
                 $"{draws} draws, {triangles} tris, biome {_generator.BiomeAt(_camera.X, _camera.Y, _camera.Z)}, " +
                 $"time {_clock.Describe()}, gpu sky/world/ui {_timerSky.Milliseconds:F2}/{_timerWorld.Milliseconds:F2}/{_timerUi.Milliseconds:F2}ms");
             SaveScreenshot(_options.ScreenshotPath);
