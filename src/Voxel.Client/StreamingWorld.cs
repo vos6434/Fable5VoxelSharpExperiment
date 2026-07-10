@@ -93,6 +93,10 @@ public sealed class StreamingWorld : IDisposable
     // Index 1..RenderLodLevels (slot 0 unused) — one section map per level.
     private readonly Dictionary<(int, int, int), LodEntry>[] _lod;
     private readonly HashSet<(int, int, int)>[] _lodRequested;
+    /// <summary>Loaded sections invalidated by block edits, awaiting a debounced re-request (plan 04 M4).</summary>
+    private readonly HashSet<(int, int, int)>[] _lodDirty;
+    private int _lodDirtyCooldown;
+    private const int LodDirtyFlushFrames = 30; // ~0.5 s edit-burst debounce
     private readonly int[] _lodCursor;
     private int _requestCursor;
     private (int X, int Y, int Z) _center = (int.MinValue, 0, 0);
@@ -106,11 +110,13 @@ public sealed class StreamingWorld : IDisposable
         _pool = new MesherPool(data.Blocks.Opaque, data.RenderTable, data.TranslucentMask, data.FlatAoMask, data.EmissiveMask);
         _lod = new Dictionary<(int, int, int), LodEntry>[RenderLodLevels + 1];
         _lodRequested = new HashSet<(int, int, int)>[RenderLodLevels + 1];
+        _lodDirty = new HashSet<(int, int, int)>[RenderLodLevels + 1];
         _lodCursor = new int[RenderLodLevels + 1];
         for (int level = 1; level <= RenderLodLevels; level++)
         {
             _lod[level] = new Dictionary<(int, int, int), LodEntry>();
             _lodRequested[level] = new HashSet<(int, int, int)>();
+            _lodDirty[level] = new HashSet<(int, int, int)>();
         }
     }
 
@@ -180,9 +186,42 @@ public sealed class StreamingWorld : IDisposable
         }
 
         RequestSome();
+        FlushLodDirty();
         ScheduleMeshes();
         _pool.DrainResults(MaxUploadsPerFrame, ApplyMeshResult);
         RefreshCoverage();
+    }
+
+    /// <summary>
+    /// Re-requests sections invalidated by edits, debounced so an edit burst
+    /// (contraption activation breaking hundreds of blocks) refreshes each
+    /// affected section once. The stale mesh keeps rendering until the fresh
+    /// payload arrives and remeshes — updates without holes.
+    /// </summary>
+    private void FlushLodDirty()
+    {
+        if (_lodDirtyCooldown > 0)
+        {
+            _lodDirtyCooldown--;
+            return;
+        }
+        for (int level = 1; level <= RenderLodLevels; level++)
+        {
+            if (_lodDirty[level].Count == 0) continue;
+            List<(int, int, int)>? batch = null;
+            foreach (var key in _lodDirty[level])
+            {
+                if (_lodRequested[level].Contains(key)) continue;
+                _lodRequested[level].Add(key);
+                (batch ??= new List<(int, int, int)>()).Add(key);
+            }
+            _lodDirty[level].Clear();
+            if (batch is not null)
+            {
+                _connection.RequestChunks((byte)level, batch);
+                _lodDirtyCooldown = LodDirtyFlushFrames;
+            }
+        }
     }
 
     /// <summary>Recomputes each meshed section's child coverage once per frame (the render enumerators read it).</summary>
@@ -304,6 +343,16 @@ public sealed class StreamingWorld : IDisposable
         int cx = Coords.WorldToChunk(wx);
         int cy = Coords.WorldToChunk(wy);
         int cz = Coords.WorldToChunk(wz);
+
+        // Any edit (including far-away ones by other players — BlockUpdate is
+        // broadcast) staleness-marks the loaded LOD sections covering it; the
+        // server has already invalidated its cache, so a re-request rebuilds.
+        for (int level = 1; level <= RenderLodLevels; level++)
+        {
+            var skey = (cx >> level, cy >> level, cz >> level);
+            if (_lod[level].ContainsKey(skey)) _lodDirty[level].Add(skey);
+        }
+
         if (!_chunks.TryGetValue((cx, cy, cz), out var entry)) return;
 
         int lx = Coords.WorldToLocal(wx);
@@ -346,7 +395,32 @@ public sealed class StreamingWorld : IDisposable
             if (chunk.LodLevel > RenderLodLevels) return;
             var lod = _lod[chunk.LodLevel];
             _lodRequested[chunk.LodLevel].Remove(key);
-            if (lod.ContainsKey(key)) return;
+            if (lod.TryGetValue(key, out var existing))
+            {
+                // Refresh after an edit (plan 04 M4): swap the data in place
+                // and remesh; the old mesh keeps drawing until then. Border
+                // faces of neighbors were culled against the old data, so
+                // they remesh too.
+                existing.Cells = chunk.Blocks;
+                existing.MeshVersion++;
+                existing.State = chunk.Blocks is null ? MeshState.Done : MeshState.None;
+                if (chunk.Blocks is null)
+                {
+                    existing.Solid?.Dispose();
+                    existing.LiquidSurface?.Dispose();
+                    existing.Translucent?.Dispose();
+                    existing.Solid = existing.LiquidSurface = existing.Translucent = null;
+                }
+                foreach (var (nx, ny, nz) in NeighborOffsets)
+                {
+                    if (lod.TryGetValue((chunk.Cx + nx, chunk.Cy + ny, chunk.Cz + nz), out var n) && n.Cells is not null)
+                    {
+                        n.MeshVersion++;
+                        n.State = MeshState.None;
+                    }
+                }
+                return;
+            }
             var (scx, scy, scz) = LodCenter(chunk.LodLevel);
             int sdx = chunk.Cx - scx, sdy = chunk.Cy - scy, sdz = chunk.Cz - scz;
             if (sdx * sdx + sdy * sdy + sdz * sdz > LodUnloadOuter * LodUnloadOuter) return; // moved away meanwhile

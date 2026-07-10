@@ -250,6 +250,31 @@ public class LodStoreTests : IDisposable
     }
 
     [Fact]
+    public void Player_builds_survive_into_distant_levels()
+    {
+        string path = TempDb();
+        var blocks = DataLoader.LoadRegistries(FindDataDir()).Blocks;
+        var generator = new WorldGen(WorldGen.DefaultSeed, blocks);
+        ushort stone = blocks.Resolve("stone");
+
+        using var store = new WorldStore(path, generator, blocks);
+        // Build far from origin with no LOD rows anywhere near: the stored
+        // chunk must make the coarse rebuild recurse instead of re-sampling
+        // the terrain function (which knows nothing about player builds).
+        store.SetBlock(520, 80, 520, stone); // chunk (32,5,32), open sky
+
+        // L2 section (8,1,8) covers (512..575, 64..127, 512..575), 4-block cells.
+        ushort[]? level2 = FetchCells(store, 2, 8, 1, 8);
+        Assert.NotNull(level2);
+        Assert.Equal(stone, level2[ChunkData.Index(2, 4, 2)]);
+
+        // L3 section (4,0,4) covers (512..639, 0..127, 512..639), 8-block cells.
+        ushort[]? level3 = FetchCells(store, 3, 4, 0, 4);
+        Assert.NotNull(level3);
+        Assert.Equal(stone, level3[ChunkData.Index(1, 10, 1)]);
+    }
+
+    [Fact]
     public void Edit_invalidates_ancestors_at_every_level()
     {
         string path = TempDb();
@@ -280,6 +305,14 @@ public class LodStoreTests : IDisposable
         ushort[]? level2 = FetchCells(store, 2, 0, 0, 0);
         Assert.NotNull(level2);
         Assert.Equal(stone, level2[ChunkData.Index(0, 15, 0)]);
+
+        // Order independence: a second edit, then fetch level 2 *before*
+        // level 1 — the deleted level-1 row rebuilds via the stored-chunks
+        // check rather than being re-sampled without the edit.
+        store.SetBlock(8, 60, 8, stone);
+        level2 = FetchCells(store, 2, 0, 0, 0);
+        Assert.NotNull(level2);
+        Assert.Equal(stone, level2[ChunkData.Index(2, 15, 2)]);
     }
 
     private static string FindDataDir()

@@ -217,14 +217,21 @@ public sealed class WorldStore : IDisposable
             }
             else
             {
-                // Higher levels never touch the chunk generator (a level-3
-                // section spans 512 chunks — recursing would generate the
+                // Higher levels avoid the chunk generator (a level-3 section
+                // spans 512 chunks — recursing blindly would generate the
                 // world for minutes). Cached child sections are used where
-                // they exist (explored terrain, faithful); everything else
-                // comes from the terrain function directly (DH-style
-                // distant generation).
+                // they exist; a missing child whose range holds *stored*
+                // chunks (explored or edited terrain — this is how edits and
+                // player builds survive into coarse levels, plan 04 M4) is
+                // rebuilt properly; everything else comes from the terrain
+                // function directly (DH-style distant generation).
+                int ci = ChunkLod.ChildIndex(dx, dy, dz);
                 byte[]? childBlob = ReadLodBlob(level - 1, cx, cy, cz);
-                children[ChunkLod.ChildIndex(dx, dy, dz)] = childBlob switch
+                if (childBlob is null && HasStoredChunks(level - 1, cx, cy, cz))
+                {
+                    childBlob = LoadLodBlob(level - 1, cx, cy, cz) ?? [];
+                }
+                children[ci] = childBlob switch
                 {
                     null => _generator.GenerateLodSection(level - 1, cx, cy, cz),
                     { Length: 0 } => null,
@@ -233,6 +240,24 @@ public sealed class WorldStore : IDisposable
             }
         }
         return ChunkLod.MipSections(children, _opaque);
+    }
+
+    /// <summary>Whether any chunk row exists inside a section's chunk range (explored/edited terrain).</summary>
+    private bool HasStoredChunks(int level, int sx, int sy, int sz)
+    {
+        int span = 1 << level;
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = """
+            SELECT EXISTS(SELECT 1 FROM chunks
+              WHERE cx BETWEEN $x0 AND $x1 AND cy BETWEEN $y0 AND $y1 AND cz BETWEEN $z0 AND $z1)
+            """;
+        cmd.Parameters.AddWithValue("$x0", sx * span);
+        cmd.Parameters.AddWithValue("$x1", sx * span + span - 1);
+        cmd.Parameters.AddWithValue("$y0", sy * span);
+        cmd.Parameters.AddWithValue("$y1", sy * span + span - 1);
+        cmd.Parameters.AddWithValue("$z0", sz * span);
+        cmd.Parameters.AddWithValue("$z1", sz * span + span - 1);
+        return Convert.ToInt32(cmd.ExecuteScalar()) == 1;
     }
 
     private static ushort[] InflateCells(byte[] blob)

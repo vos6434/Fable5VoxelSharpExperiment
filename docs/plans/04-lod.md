@@ -170,6 +170,18 @@ distance-scaled sync for physics contraptions.
 4. **Edit invalidation end-to-end** — break a mountain top; ancestors
    regenerate; client re-requests affected sections (server pushes a
    section-dirty notice or client polls on BlockUpdate outside LOD0).
+
+   **DONE (2026-07-10).** Server: a level ≥ 2 rebuild with a missing child
+   now checks for *stored chunks* in the child's range — explored/edited
+   terrain rebuilds recursively (so edits and player builds survive into
+   every level, order-independent), only untouched terrain re-samples.
+   Client: BlockUpdate (already broadcast for every edit) marks the loaded
+   ancestor sections dirty; a debounced flush (~0.5 s) re-requests them,
+   arrivals refresh entries in place (stale mesh draws until the remesh —
+   no holes) and remesh border neighbors. Verified: glowstone pillar placed
+   at spawn appears in a witness client's level-1/2 LOD 240 blocks away,
+   both when joining after the edit and live via a second client on a
+   dedicated server (m4-live.png: pillar pops in within ~1 s).
 5. **Contraption tiers** — sync-rate scaling + far-freeze (unchanged).
 6. **Tuning pass** — pop masking, budgets, hell; stretch: shared quad
    buffer + one multi-draw per level.
