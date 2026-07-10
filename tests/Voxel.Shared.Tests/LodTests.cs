@@ -216,6 +216,40 @@ public class LodStoreTests : IDisposable
     }
 
     [Fact]
+    public void Distant_levels_never_generate_chunks()
+    {
+        string path = TempDb();
+        var blocks = DataLoader.LoadRegistries(FindDataDir()).Blocks;
+        var generator = new WorldGen(WorldGen.DefaultSeed, blocks);
+
+        using var store = new WorldStore(path, generator, blocks);
+        int before = store.ChunkCount;
+        // A far level-3 section spans 512 chunks; it must come from the
+        // terrain function (DH-style distant generation), not the generator.
+        Assert.NotNull(store.LoadLodBlob(3, 10, 0, 10));
+        Assert.NotNull(store.LoadLodBlob(2, -20, 0, 15));
+        Assert.Equal(before, store.ChunkCount);
+    }
+
+    [Fact]
+    public void Distant_generation_is_deterministic_and_bounded()
+    {
+        var blocks = DataLoader.LoadRegistries(FindDataDir()).Blocks;
+        var generator = new WorldGen(WorldGen.DefaultSeed, blocks);
+
+        // Sky-only section: null (all air). Terrain tops out well below y=128.
+        Assert.Null(generator.GenerateLodSection(2, 3, 2, 3));
+
+        // Deep section below the hell boundary: fully solid.
+        ushort[]? deep = generator.GenerateLodSection(2, 3, -2, 3);
+        Assert.NotNull(deep);
+        Assert.All(deep, id => Assert.NotEqual(0, id));
+
+        // Surface section: deterministic across calls.
+        Assert.Equal(generator.GenerateLodSection(2, 0, 0, 0), generator.GenerateLodSection(2, 0, 0, 0));
+    }
+
+    [Fact]
     public void Edit_invalidates_ancestors_at_every_level()
     {
         string path = TempDb();

@@ -198,6 +198,65 @@ public sealed class WorldGen
         return (0, SurfaceHeight(0, 0), 0);
     }
 
+    /// <summary>
+    /// Distant generation (plan 04 v2 M3, Distant Horizons-style): a coarse
+    /// LOD section sampled straight from the terrain function — one column
+    /// sample per cell, so the cost is level-independent, versus 8^level
+    /// chunks for a true mip. Matches the mip's look: the cell containing
+    /// the surface takes the biome top block, water fills to sea level (ice
+    /// caps frozen oceans), strata/stone below; carved caves and hell
+    /// interiors are skipped — invisible at the distances this serves.
+    /// Returns null when the section is all air.
+    /// </summary>
+    public ushort[]? GenerateLodSection(int level, int sx, int sy, int sz)
+    {
+        int cell = 1 << level;
+        int size = Constants.ChunkSize << level;
+        int x0 = sx * size, y0 = sy * size, z0 = sz * size;
+        ushort[]? cells = null;
+
+        for (int cz = 0; cz < Constants.ChunkSize; cz++)
+        for (int cx = 0; cx < Constants.ChunkSize; cx++)
+        {
+            double wx = x0 + cx * cell + cell * 0.5;
+            double wz = z0 + cz * cell + cell * 0.5;
+            int h = SurfaceHeight(wx, wz);
+            if (y0 > Math.Max(h, SeaLevel)) continue; // column entirely air
+            SurfaceBiome biome = GetSurfaceBiome(wx, wz, h);
+            double hellB = HellBoundary(wx, wz);
+
+            for (int cy = 0; cy < Constants.ChunkSize; cy++)
+            {
+                int yBot = y0 + cy * cell;
+                int yTop = yBot + cell - 1;
+                ushort id;
+                if (yBot > h)
+                {
+                    // Above terrain: water up to sea level (blocks at y ≤ SeaLevel
+                    // are water in Generate), ice sheet on frozen oceans.
+                    if (yBot > SeaLevel) break; // everything above is air too
+                    id = biome == SurfaceBiome.FrozenOcean && SeaLevel >= yBot && SeaLevel <= yTop
+                        ? _ice : _water;
+                }
+                else if (yTop >= h)
+                {
+                    id = SurfaceTop(biome, h); // cell contains the surface — top block wins (mip parity)
+                }
+                else if (h - yTop <= 3)
+                {
+                    id = SubSurface(biome, h);
+                }
+                else
+                {
+                    id = yTop <= hellB ? _hellstone : _stone;
+                }
+                cells ??= new ushort[Constants.ChunkVolume];
+                cells[ChunkData.Index(cx, cy, cz)] = id;
+            }
+        }
+        return cells;
+    }
+
     private ushort SurfaceTop(SurfaceBiome biome, int h) => biome switch
     {
         SurfaceBiome.Grassland => _grass,

@@ -209,13 +209,27 @@ public sealed class WorldStore : IDisposable
             int cx = sx * 2 + dx, cy = sy * 2 + dy, cz = sz * 2 + dz;
             if (level == 1)
             {
+                // True mip from source chunks — the level-1 ring is near
+                // enough that generating its chunks is affordable and edits
+                // show faithfully.
                 var chunk = Load(cx, cy, cz);
                 children[ChunkLod.ChildIndex(dx, dy, dz)] = chunk.CountSolid() == 0 ? null : chunk.Blocks;
             }
             else
             {
-                byte[]? childBlob = LoadLodBlob(level - 1, cx, cy, cz);
-                children[ChunkLod.ChildIndex(dx, dy, dz)] = childBlob is null ? null : InflateCells(childBlob);
+                // Higher levels never touch the chunk generator (a level-3
+                // section spans 512 chunks — recursing would generate the
+                // world for minutes). Cached child sections are used where
+                // they exist (explored terrain, faithful); everything else
+                // comes from the terrain function directly (DH-style
+                // distant generation).
+                byte[]? childBlob = ReadLodBlob(level - 1, cx, cy, cz);
+                children[ChunkLod.ChildIndex(dx, dy, dz)] = childBlob switch
+                {
+                    null => _generator.GenerateLodSection(level - 1, cx, cy, cz),
+                    { Length: 0 } => null,
+                    _ => InflateCells(childBlob),
+                };
             }
         }
         return ChunkLod.MipSections(children, _opaque);

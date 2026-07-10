@@ -10,7 +10,8 @@
 // Emissive blocks (meta.y >= 4) render fullbright.
 uniform sampler2DArray uAtlas;
 uniform vec3 uCameraPos;
-uniform vec3 uFogColor;
+uniform vec3 uFogColor;   // sky horizon tint
+uniform vec3 uFogZenith;  // sky zenith tint — fog reproduces the sky gradient
 uniform float uFogNear;
 uniform float uFogFar;
 uniform float uAlphaTest;
@@ -289,8 +290,13 @@ void main() {
     vec3 light = uAmbientFloor + skyLight + dirLight + blockLight(vWorldPos, normal);
     vec3 color = texel.rgb * vMeta.y * light;
 
-    // Fog uses the horizon tint — only apply it where the fragment can see
-    // sky, otherwise distant cave walls fog to blue even in total darkness.
+    // Fog reproduces the sky-pass gradient in the fragment's view direction
+    // (same pow(up, 0.55) ramp as sky.frag), so fully-fogged terrain melts
+    // into the sky instead of silhouetting against it. Only applied where
+    // the fragment can see sky, otherwise distant cave walls fog to blue
+    // even in total darkness.
+    vec3 viewDir = (vWorldPos - uCameraPos) / max(vFogDepth, 1e-3);
+    vec3 fogColor = mix(uFogColor, uFogZenith, pow(clamp(viewDir.y, 0.0, 1.0), 0.55));
     float fogFactor = smoothstep(uFogNear, uFogFar, vFogDepth) * skyVis;
-    outColor = vec4(mix(color, uFogColor, fogFactor), texel.a);
+    outColor = vec4(mix(color, fogColor, fogFactor), texel.a);
 }

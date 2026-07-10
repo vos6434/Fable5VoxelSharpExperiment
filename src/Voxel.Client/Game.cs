@@ -38,10 +38,11 @@ public sealed record GameOptions
 /// </summary>
 public sealed class Game
 {
-    // Fog completes one chunk inside the LOD1 ring's edge (plan 04 M2) so the
-    // hard slice at the render sphere boundary sits past full fog.
+    // Fog completes one chunk inside the coarsest LOD ring's edge (plan 04 v2)
+    // so the hard slice at the render sphere boundary sits past full fog; the
+    // ramp covers the last quarter of the reach.
     private const float FogFar = (StreamingWorld.LodReachChunks - 1) * Constants.ChunkSize;
-    private const float FogNear = FogFar - 4 * Constants.ChunkSize;
+    private const float FogNear = FogFar * 0.75f;
 
     private static readonly (float R, float G, float B) SurfaceSky = (0x87 / 255f, 0xCE / 255f, 0xEB / 255f);
     private static readonly (float R, float G, float B) HellSky = (0x2A / 255f, 0x07 / 255f, 0x05 / 255f);
@@ -726,13 +727,14 @@ public sealed class Game
 
         _timerWorld.Begin();
         float[] viewProj = Mat4.Multiply(
-            Mat4.PerspectiveGl(fovY, aspect, 0.1f, 1000f),
+            Mat4.PerspectiveGl(fovY, aspect, 0.1f, 4096f), // far covers the 64-chunk LOD reach
             Mat4.View(_camera.X, _camera.Y, _camera.Z, _camera.Yaw, _camera.Pitch));
 
         _shader.Use();
         _shader.SetMatrix("uViewProj", viewProj);
         _shader.SetVec3("uCameraPos", _camera.X, _camera.Y, _camera.Z);
         _shader.SetVec3("uFogColor", horizon.R, horizon.G, horizon.B);
+        _shader.SetVec3("uFogZenith", zenith.R, zenith.G, zenith.B); // fog matches the sky gradient per direction
         _shader.SetFloat("uFogNear", fogNear);
         _shader.SetFloat("uFogFar", fogFar);
         _shader.SetVec3("uAmbientFloor", ambientFloor.R, ambientFloor.G, ambientFloor.B);

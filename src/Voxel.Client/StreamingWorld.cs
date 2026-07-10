@@ -28,8 +28,8 @@ public sealed class StreamingWorld : IDisposable
     private const int DataRadius = RenderRadius + 1;
     private const int UnloadRadius = DataRadius + 2;
 
-    /// <summary>Coarsest level the client streams/renders (plan 04 v2 M2: level 1; M3 raises it).</summary>
-    public const int RenderLodLevels = 1;
+    /// <summary>Coarsest level the client streams/renders (plan 04 v2 M3: 3 → 64-chunk reach).</summary>
+    public const int RenderLodLevels = 3;
 
     /// <summary>Chunk reach of the coarsest LOD ring (drives fog placement).</summary>
     public const int LodReachChunks = RenderRadius << RenderLodLevels;
@@ -71,6 +71,8 @@ public sealed class StreamingWorld : IDisposable
         public ChunkMesh? Solid;
         public ChunkMesh? LiquidSurface;
         public ChunkMesh? Translucent;
+        /// <summary>Child footprints (of 8) with a Done finer stage; refreshed once per frame.</summary>
+        public int Covered;
     }
 
     // FACE_DIRS order: px, nx, py, ny, pz, nz.
@@ -180,6 +182,20 @@ public sealed class StreamingWorld : IDisposable
         RequestSome();
         ScheduleMeshes();
         _pool.DrainResults(MaxUploadsPerFrame, ApplyMeshResult);
+        RefreshCoverage();
+    }
+
+    /// <summary>Recomputes each meshed section's child coverage once per frame (the render enumerators read it).</summary>
+    private void RefreshCoverage()
+    {
+        for (int level = 1; level <= RenderLodLevels; level++)
+        {
+            foreach (var e in _lod[level].Values)
+            {
+                if (e.Solid is null && e.LiquidSurface is null && e.Translucent is null) continue;
+                e.Covered = CoveredChildren(level, e.Sx, e.Sy, e.Sz);
+            }
+        }
     }
 
     /// <summary>World-related server events, routed here by the Game's event drain.</summary>
@@ -257,7 +273,7 @@ public sealed class StreamingWorld : IDisposable
     {
         foreach (var e in _lod[level].Values)
         {
-            if (e.Solid is not null && CoveredChildren(level, e.Sx, e.Sy, e.Sz) < 8) yield return (e.Sx, e.Sy, e.Sz, e.Solid);
+            if (e.Solid is not null && e.Covered < 8) yield return (e.Sx, e.Sy, e.Sz, e.Solid);
         }
     }
 
@@ -265,7 +281,7 @@ public sealed class StreamingWorld : IDisposable
     {
         foreach (var e in _lod[level].Values)
         {
-            if (e.LiquidSurface is not null && CoveredChildren(level, e.Sx, e.Sy, e.Sz) < 8) yield return (e.Sx, e.Sy, e.Sz, e.LiquidSurface);
+            if (e.LiquidSurface is not null && e.Covered < 8) yield return (e.Sx, e.Sy, e.Sz, e.LiquidSurface);
         }
     }
 
@@ -278,7 +294,7 @@ public sealed class StreamingWorld : IDisposable
     {
         foreach (var e in _lod[level].Values)
         {
-            if (e.Translucent is not null && CoveredChildren(level, e.Sx, e.Sy, e.Sz) == 0) yield return (e.Sx, e.Sy, e.Sz, e.Translucent);
+            if (e.Translucent is not null && e.Covered == 0) yield return (e.Sx, e.Sy, e.Sz, e.Translucent);
         }
     }
 

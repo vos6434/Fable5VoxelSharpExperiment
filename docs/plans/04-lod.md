@@ -151,6 +151,22 @@ distance-scaled sync for physics contraptions.
 3. **Levels 2–3 + refinement** — full 32→64 chunk reach; hole-free
    hierarchical swap rule; draw/tri budget measured at spawn, mountains,
    ocean; fog/sky horizon match.
+
+   **DONE (2026-07-10).** RenderLodLevels = 3 (64-chunk reach). Key
+   addition beyond flipping the constant: **distant generation** — a
+   level-3 section spans 512 chunks, so levels ≥ 2 never touch the chunk
+   generator; children come from cached level-below rows where explored
+   and from `WorldGen.GenerateLodSection` (one heightmap column sample per
+   cell, level-independent cost) everywhere else, exactly DH's model.
+   Fog now reproduces the sky-pass gradient per view direction (uFogZenith
+   + pow(up, 0.55) in chunk.frag) — the grey horizon silhouettes are gone.
+   Far plane 1000 → 4096; coverage counts cached once per frame.
+   Measured at 64-chunk reach: spawn ocean 769 draws / 243k tris, high
+   altitude 609 / 187k, land 825 / 283k — all 60 fps, world GPU 3–12 ms.
+   Above the < 600 draw target → per-level merged buffers stay on M6's
+   list. Caveat recorded for M4: after an edit, a level ≥ 2 rebuild reads
+   cached children or re-samples terrain, so edits currently propagate
+   reliably only to level 1.
 4. **Edit invalidation end-to-end** — break a mountain top; ancestors
    regenerate; client re-requests affected sections (server pushes a
    section-dirty notice or client polls on BlockUpdate outside LOD0).
